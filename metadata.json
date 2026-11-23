@@ -1,0 +1,11 @@
+{
+  "name": "LiveChatter",
+  "description": "Real-time community communication platform with text, voice, stage, and forum channels, direct messages, moderation tools, and free customization for everyone.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
