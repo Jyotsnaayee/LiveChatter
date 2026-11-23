@@ -179,6 +179,36 @@ export function createInitialSeedData() {
       createdAt: '2024-01-01T00:00:00.000Z',
       settings: { ...DEFAULT_USER_SETTINGS },
     },
+    'bot-help': {
+      id: 'bot-help',
+      username: 'helpbot',
+      displayName: 'LiveChatter Help Bot',
+      avatarColor: '#0D9488',
+      bannerColor: '#115E59',
+      bio: 'Your personal LiveChatter onboarding & help assistant. Message me anytime about adding friends, invite codes, servers, or tickets.',
+      pronouns: 'bot',
+      status: 'online',
+      customStatus: { emoji: '💡', text: 'Here to help — ask me anything!' },
+      isBot: true,
+      connectedAccounts: [],
+      createdAt: '2024-01-01T00:00:00.000Z',
+      settings: { ...DEFAULT_USER_SETTINGS },
+    },
+    'bot-ticket': {
+      id: 'bot-ticket',
+      username: 'ticketbot',
+      displayName: 'Ticket Bot',
+      avatarColor: '#4F46E5',
+      bannerColor: '#312E81',
+      bio: 'Automatically installed in every server to open personal tickets for queries, support help, and claiming server invite rewards.',
+      pronouns: 'bot',
+      status: 'online',
+      customStatus: { emoji: '🎫', text: 'Open a personal ticket anytime' },
+      isBot: true,
+      connectedAccounts: [],
+      createdAt: '2024-01-01T00:00:00.000Z',
+      settings: { ...DEFAULT_USER_SETTINGS },
+    },
   };
 
   const botDirectory: InstalledBot[] = [
@@ -229,6 +259,18 @@ export function createInitialSeedData() {
       verified: true,
       installed: false,
       commands: [],
+    },
+    {
+      id: 'bot-ticket',
+      name: 'Ticket Bot',
+      handle: '@ticketbot',
+      description: 'Automatically installed in every server. Lets members create private personal tickets for queries, help, and claiming owner-configured invite rewards.',
+      category: 'Utility',
+      verified: true,
+      installed: true,
+      commands: [
+        { name: '/ticket', description: 'Open a personal ticket in this server', usage: '/ticket Need help with roles' },
+      ],
     },
   ];
 
@@ -512,7 +554,32 @@ export function createInitialSeedData() {
           lastTriggeredAt: hoursAgo(4),
         },
       ],
-      installedBotIds: ['bot-relay', 'bot-sentinel'],
+      installedBotIds: ['bot-relay', 'bot-sentinel', 'bot-ticket'],
+      ticketBot: {
+        enabled: true,
+        welcomeMessage: 'Need help, have a question, or ready to claim an invite reward? Generate a personal ticket below and server staff will respond privately.',
+        inviteRewardsEnabled: true,
+        inviteRewards: [
+          {
+            id: 'rw-k-1',
+            title: 'Community Supporter Role',
+            description: 'Invite 3 friends to Kernel & Craft to unlock the Supporter shoutout & contributor role.',
+            requiredInvites: 3,
+            roleId: 'role-k-contrib',
+          },
+          {
+            id: 'rw-k-2',
+            title: 'Stage Co-Host Pass',
+            description: 'Invite 5 friends to co-host a weekly community workshop on the Town Hall stage.',
+            requiredInvites: 5,
+          },
+        ],
+      },
+      memberInviteCounts: {
+        'user-alex': 4,
+        'user-marcus': 3,
+        'user-priya': 2,
+      },
     },
     {
       id: 'srv-atlas',
@@ -612,7 +679,16 @@ export function createInitialSeedData() {
         { code: 'atlas-study', serverId: 'srv-atlas', createdBy: 'user-priya', uses: 19, maxUses: 0, temporary: false },
       ],
       webhooks: [],
-      installedBotIds: ['bot-relay'],
+      installedBotIds: ['bot-relay', 'bot-ticket'],
+      ticketBot: {
+        enabled: true,
+        welcomeMessage: 'Open a private personal ticket for study group queries, moderation help, or invite reward claims.',
+        inviteRewardsEnabled: false,
+        inviteRewards: [],
+      },
+      memberInviteCounts: {
+        'user-priya': 2,
+      },
     },
     {
       id: 'srv-vanguard',
@@ -692,7 +768,24 @@ export function createInitialSeedData() {
         { code: 'vanguard', serverId: 'srv-vanguard', createdBy: 'user-marcus', uses: 11, maxUses: 0, temporary: false },
       ],
       webhooks: [],
-      installedBotIds: ['bot-relay'],
+      installedBotIds: ['bot-relay', 'bot-ticket'],
+      ticketBot: {
+        enabled: true,
+        welcomeMessage: 'Need squad support, tournament help, or want to claim squad invite rewards? Open a personal ticket here.',
+        inviteRewardsEnabled: true,
+        inviteRewards: [
+          {
+            id: 'rw-v-1',
+            title: 'Squad Recruiter Badge',
+            description: 'Invite 2 teammates to Vanguard Guild to claim priority tournament bracket seeding.',
+            requiredInvites: 2,
+          },
+        ],
+      },
+      memberInviteCounts: {
+        'user-marcus': 2,
+        'user-alex': 2,
+      },
     },
   ];
 

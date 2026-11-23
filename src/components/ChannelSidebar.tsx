@@ -18,6 +18,8 @@ import {
   Search,
   Settings,
   ShieldCheck,
+  Terminal,
+  Ticket,
   UserPlus,
   Users,
   Volume2,
@@ -37,6 +39,8 @@ interface ChannelSidebarProps {
   server: Server | null;
   dms: DirectMessageThread[];
   activeChannelId: string | null;
+  activeTicketsView?: boolean;
+  openTicketsCount?: number;
   activeHomeTab: 'friends' | 'requests' | 'dm';
   currentUser: User;
   users: Record<string, User>;
@@ -44,6 +48,7 @@ interface ChannelSidebarProps {
   mutedChannelIds: string[];
   unreadChannelIds: string[];
   onSelectChannel: (channelId: string) => void;
+  onSelectTicketDesk: () => void;
   onSelectHomeTab: (tab: 'friends' | 'requests') => void;
   onSelectDm: (dmId: string) => void;
   onOpenCreateDm: () => void;
@@ -59,7 +64,16 @@ interface ChannelSidebarProps {
   onUpdatePresence: (status: PresenceStatus, customStatus?: User['customStatus']) => void;
 }
 
-export function ChannelIcon({ type, className = 'h-4 w-4 shrink-0' }: { type: Channel['type']; className?: string }) {
+export function ChannelIcon({
+  type,
+  isBotCmdChannel = false,
+  className = 'h-4 w-4 shrink-0',
+}: {
+  type: Channel['type'];
+  isBotCmdChannel?: boolean;
+  className?: string;
+}) {
+  if (isBotCmdChannel) return <Terminal className={className} />;
   if (type === 'voice') return <Volume2 className={className} />;
   if (type === 'stage') return <Radio className={className} />;
   if (type === 'forum') return <MessagesSquare className={className} />;
@@ -72,6 +86,8 @@ export function ChannelSidebar({
   server,
   dms,
   activeChannelId,
+  activeTicketsView = false,
+  openTicketsCount = 0,
   activeHomeTab,
   currentUser,
   users,
@@ -79,6 +95,7 @@ export function ChannelSidebar({
   mutedChannelIds,
   unreadChannelIds,
   onSelectChannel,
+  onSelectTicketDesk,
   onSelectHomeTab,
   onSelectDm,
   onOpenCreateDm,
@@ -207,8 +224,31 @@ export function ChannelSidebar({
       <div className="flex-1 overflow-y-auto px-2 py-3 space-y-4">
         {mode === 'server' && server ? (
           <>
-            {/* Quick server utility links (Events & Server Settings) */}
+            {/* Quick server utility links (Ticket Bot, Events & Server Settings) */}
             <div className="space-y-0.5">
+              <button
+                type="button"
+                onClick={onSelectTicketDesk}
+                className={`flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-sm transition-colors ${
+                  activeTicketsView
+                    ? 'bg-slate-200/90 dark:bg-white/[0.09] font-medium text-slate-950 dark:text-white'
+                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-white/[0.05] hover:text-slate-900 dark:hover:text-white'
+                }`}
+              >
+                <span className="flex items-center gap-2 truncate">
+                  <Ticket
+                    className={`h-4 w-4 shrink-0 ${
+                      activeTicketsView ? 'text-[var(--accent)]' : 'text-indigo-500'
+                    }`}
+                  />
+                  <span className="truncate">Ticket Bot</span>
+                </span>
+                {openTicketsCount > 0 && (
+                  <span className="font-mono text-xs font-semibold text-indigo-600 dark:text-indigo-400 tabular-nums">
+                    {openTicketsCount}
+                  </span>
+                )}
+              </button>
               <button
                 type="button"
                 onClick={() => onOpenServerSettings('events')}
@@ -292,13 +332,23 @@ export function ChannelSidebar({
                             <span className="flex items-center gap-2 min-w-0">
                               <ChannelIcon
                                 type={channel.type}
+                                isBotCmdChannel={Boolean(channel.isBotCmdChannel || channel.id === server.botCmdChannelId)}
                                 className={`h-4 w-4 shrink-0 ${
-                                  active ? 'text-[var(--accent)]' : 'text-slate-400 dark:text-slate-500'
+                                  active
+                                    ? 'text-[var(--accent)]'
+                                    : channel.isBotCmdChannel || channel.id === server.botCmdChannelId
+                                    ? 'text-emerald-600 dark:text-emerald-400'
+                                    : 'text-slate-400 dark:text-slate-500'
                                 }`}
                               />
                               <span className="truncate">{channel.name}</span>
                               {channel.isPrivate && <Lock className="h-3 w-3 shrink-0 text-slate-400" />}
                             </span>
+                            {(channel.isBotCmdChannel || channel.id === server.botCmdChannelId) && !unread && (
+                              <span className="shrink-0 rounded bg-emerald-500/12 px-1 py-0.5 font-mono text-[9px] font-bold text-emerald-700 dark:text-emerald-300">
+                                CMD
+                              </span>
+                            )}
                             {unread && (
                               <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--accent)]" aria-label="Unread" />
                             )}
@@ -421,7 +471,14 @@ export function ChannelSidebar({
                       <Avatar user={others[0]} size="sm" showPresence />
                     )}
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium">{title}</p>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <p className="truncate text-sm font-medium">{title}</p>
+                        {!dm.isGroup && others[0]?.isBot && (
+                          <span className="shrink-0 rounded bg-teal-500/15 px-1 py-0.5 font-mono text-[9px] font-bold text-teal-700 dark:text-teal-300">
+                            BOT
+                          </span>
+                        )}
+                      </div>
                       <p className="truncate text-xs text-slate-500 dark:text-slate-400">
                         {dm.isGroup ? `${dm.participantIds.length} members` : others[0]?.customStatus?.text || PRESENCE_LABEL[others[0]?.status || 'offline']}
                       </p>

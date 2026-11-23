@@ -11,6 +11,8 @@ import type {
   FriendInviteCode,
   FriendRelation,
   InboxItem,
+  InviteLink,
+  InviteRewardTier,
   Message,
   MessageAttachment,
   PermissionKey,
@@ -20,7 +22,11 @@ import type {
   ScheduledEvent,
   Server,
   ServerFolder,
+  SupportTicket,
   Thread,
+  TicketBotConfig,
+  TicketCategory,
+  TicketStatus,
   User,
   UserSettings,
   VoiceClip,
@@ -54,6 +60,8 @@ export class LiveChatterStore {
   private dms: DirectMessageThread[];
   private friendsByUser: Record<string, FriendRelation[]>;
   private friendInvites: FriendInviteCode[];
+  private tickets: SupportTicket[] = [];
+  private ticketCounter = 1001;
   private voiceParticipants: VoiceParticipant[];
   private whiteboardStrokes: Record<string, WhiteboardStroke[]>;
   private botDirectory: ReturnType<typeof createInitialSeedData>['botDirectory'];
@@ -134,6 +142,287 @@ export class LiveChatterStore {
     this.unreadByUser = { 'user-alex': seed.unreadChannelIds };
 
     this.loadFromDisk();
+    this.ensureCoreBotsAndTicketSetup(seed);
+  }
+
+  private ensureCoreBotsAndTicketSetup(seed: ReturnType<typeof createInitialSeedData>) {
+    // Ensure Help Bot and Ticket Bot always exist in users & bot directory
+    if (!this.users['bot-help'] && seed.users['bot-help']) {
+      this.users['bot-help'] = seed.users['bot-help'];
+    }
+    if (!this.users['bot-ticket'] && seed.users['bot-ticket']) {
+      this.users['bot-ticket'] = seed.users['bot-ticket'];
+    }
+    if (!this.botDirectory.some((b) => b.id === 'bot-ticket')) {
+      const ticketBotEntry = seed.botDirectory.find((b) => b.id === 'bot-ticket');
+      if (ticketBotEntry) this.botDirectory.push(ticketBotEntry);
+    }
+
+    // Automatically ensure Ticket Bot is installed and configured in every server
+    for (const server of this.servers) {
+      if (!server.installedBotIds.includes('bot-ticket')) {
+        server.installedBotIds.push('bot-ticket');
+      }
+      if (!server.members.some((m) => m.userId === 'bot-ticket')) {
+        const defaultRole =
+          server.roles.find((r) => r.name === '@everyone') || server.roles[server.roles.length - 1];
+        server.members.push({
+          userId: 'bot-ticket',
+          roleIds: defaultRole ? [defaultRole.id] : [],
+          joinedAt: new Date().toISOString(),
+          rulesAccepted: true,
+        });
+      }
+      if (!server.ticketBot) {
+        const seededMatch = seed.servers.find((s) => s.id === server.id);
+        server.ticketBot = seededMatch?.ticketBot || {
+          enabled: true,
+          welcomeMessage:
+            'Have a question, need help, or ready to claim an invite reward? Generate a personal ticket below and server staff will assist you privately.',
+          inviteRewardsEnabled: false,
+          inviteRewards: [],
+        };
+      }
+      if (!server.memberInviteCounts) {
+        const seededMatch = seed.servers.find((s) => s.id === server.id);
+        server.memberInviteCounts = seededMatch?.memberInviteCounts || {};
+      }
+
+      // Ensure every server has a marked Default Server Invite Link (isDefault: true, isCustom: false)
+      let defaultInvite = server.invites.find((inv) => inv.isDefault);
+      if (!defaultInvite) {
+        const vanityMatch = server.vanityCode
+          ? server.invites.find((inv) => inv.code.toLowerCase() === server.vanityCode!.toLowerCase())
+          : undefined;
+        if (vanityMatch && !vanityMatch.isCustom) {
+          vanityMatch.isDefault = true;
+          vanityMatch.isCustom = false;
+          defaultInvite = vanityMatch;
+        } else if (server.invites[0] && !server.invites[0].isCustom) {
+          server.invites[0].isDefault = true;
+          server.invites[0].isCustom = false;
+          defaultInvite = server.invites[0];
+        } else {
+          const fallbackCode = server.vanityCode || `${server.id.replace(/^srv-/, '')}-default`;
+          defaultInvite = {
+            code: fallbackCode,
+            serverId: server.id,
+            createdBy: server.ownerId,
+            uses: 0,
+            maxUses: 0,
+            temporary: false,
+            isDefault: true,
+            isCustom: false,
+          };
+          server.invites.unshift(defaultInvite);
+        }
+      }
+
+      // Ensure every server has a designated #bot-cmd channel with a pinned Default Server Link message
+      let botCmdChannel =
+        (server.botCmdChannelId && server.channels.find((c) => c.id === server.botCmdChannelId)) ||
+        server.channels.find((c) => c.isBotCmdChannel || c.name === 'bot-cmd');
+      if (!botCmdChannel) {
+        const firstTextCat = server.categories[0]?.id;
+        botCmdChannel = {
+          id: `ch-${server.id.replace(/^srv-/, '')}-bot-cmd`,
+          serverId: server.id,
+          categoryId: firstTextCat,
+          name: server.botCmdConfig?.channelName || 'bot-cmd',
+          type: 'text',
+          topic: 'Run bot commands here (-i to check invites, /invite link for personal tracked links).',
+          position: server.channels.length,
+          slowmodeSeconds: 0,
+          isPrivate: false,
+          ageRestricted: false,
+          isBotCmdChannel: true,
+        };
+        server.channels.push(botCmdChannel);
+      } else {
+        botCmdChannel.isBotCmdChannel = true;
+      }
+      server.botCmdChannelId = botCmdChannel.id;
+      if (!server.botCmdConfig) {
+        server.botCmdConfig = {
+          channelName: botCmdChannel.name,
+          enabledCommands: ['-i', '/invite link', '/ticket', '/poll', '/roll', '/coinflip', '/remind', '/serverinfo', '/help'],
+        };
+      }
+      this.ensurePinnedDefaultInviteMessage(server, botCmdChannel, defaultInvite.code);
+    }
+  }
+
+  private ensurePinnedDefaultInviteMessage(server: Server, botCmdChannel: Channel, defaultCode: string) {
+    if (!this.messages[botCmdChannel.id]) {
+      this.messages[botCmdChannel.id] = [];
+    }
+    const existingPinned = this.messages[botCmdChannel.id].find(
+      (m) => m.pinned && m.embed?.title === 'Default Server Invite Link (Pinned)'
+    );
+    if (!existingPinned) {
+      const pinnedMsg: Message = {
+        id: `msg-pin-${server.id}`,
+        channelId: botCmdChannel.id,
+        authorId: 'bot-relay',
+        content: '',
+        pinned: true,
+        embed: {
+          title: 'Default Server Invite Link (Pinned)',
+          description: `Share **${server.name}** with the default server link: \`https://livechatter.app/invite/${defaultCode}\` (code: \`${defaultCode}\`).\n\n**Important:** Joining through this default server link does **not** increase anyone's invite count. To earn tracked invites, run \`/invite link\` here to create your own personal custom invite link (supports expiry periods & **Never**), and type \`-i\` to check your invite count.`,
+          fields: [
+            { name: 'Default Invite Code', value: defaultCode },
+            { name: 'Invite Count Credit', value: 'Does NOT count toward personal invites' },
+            { name: 'Personal Commands', value: '`-i` (check invites) · `/invite link` (custom link)' },
+          ],
+          footer: `Pinned in #${botCmdChannel.name} · Bot commands are only allowed in this channel`,
+        },
+        createdAt: new Date(Date.now() - 60_000).toISOString(),
+        reactions: [],
+        attachments: [],
+      };
+      this.messages[botCmdChannel.id].unshift(pinnedMsg);
+    }
+  }
+
+  public getDefaultInviteCode(server: Server): string {
+    const def = server.invites.find((i) => i.isDefault) || server.invites.find((i) => !i.isCustom);
+    return def?.code || server.vanityCode || server.id;
+  }
+
+  private parseInviteExpiryArg(rawArg: string): { minutes: number | null; label: string } {
+    const norm = rawArg.trim().toLowerCase();
+    if (!norm || norm === 'never' || norm === 'none' || norm === '0' || norm === 'forever') {
+      return { minutes: null, label: 'Never expires' };
+    }
+    if (norm === '30m' || norm === '30min' || norm === '30mins') {
+      return { minutes: 30, label: '30 Minutes' };
+    }
+    if (norm === '1h' || norm === '60m' || norm === '1hr' || norm === 'hour') {
+      return { minutes: 60, label: '1 Hour' };
+    }
+    if (norm === '6h' || norm === '6hr') {
+      return { minutes: 360, label: '6 Hours' };
+    }
+    if (norm === '12h' || norm === '12hr') {
+      return { minutes: 720, label: '12 Hours' };
+    }
+    if (norm === '24h' || norm === '1d' || norm === 'day') {
+      return { minutes: 1440, label: '24 Hours' };
+    }
+    if (norm === '7d' || norm === 'week' || norm === '1w') {
+      return { minutes: 10080, label: '7 Days' };
+    }
+    if (norm === '30d' || norm === 'month') {
+      return { minutes: 43200, label: '30 Days' };
+    }
+    const numMatch = norm.match(/^(\d+)(m|h|d)$/);
+    if (numMatch) {
+      const val = Math.max(1, Number(numMatch[1]));
+      const unit = numMatch[2];
+      if (unit === 'm') return { minutes: val, label: `${val} Minute${val === 1 ? '' : 's'}` };
+      if (unit === 'h') return { minutes: val * 60, label: `${val} Hour${val === 1 ? '' : 's'}` };
+      if (unit === 'd') return { minutes: val * 1440, label: `${val} Day${val === 1 ? '' : 's'}` };
+    }
+    return { minutes: null, label: 'Never expires' };
+  }
+
+  private formatExpiryLabel(expiresInMinutes: number | null): string {
+    if (!expiresInMinutes || expiresInMinutes <= 0) return 'Never expires';
+    if (expiresInMinutes < 60) return `${expiresInMinutes} Minutes`;
+    if (expiresInMinutes < 1440) {
+      const hrs = Math.round(expiresInMinutes / 60);
+      return `${hrs} Hour${hrs === 1 ? '' : 's'}`;
+    }
+    const days = Math.round(expiresInMinutes / 1440);
+    return `${days} Day${days === 1 ? '' : 's'}`;
+  }
+
+  public createCustomServerInvite(
+    userId: string,
+    serverId: string,
+    expiresInMinutes: number | null,
+    postToBotCmd = true
+  ): { server: Server; invite: InviteLink; message?: Message } {
+    const server = this.getServer(serverId);
+    if (!server) throw new Error('Server not found.');
+    if (!server.members.some((m) => m.userId === userId)) {
+      throw new Error('You must be a member of this server to create a custom invite link.');
+    }
+    const user = this.users[userId];
+    const userPrefix = (user?.username || 'member').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'user';
+    const code = `inv-${userPrefix}-${crypto.randomBytes(2).toString('hex')}`;
+    const validMinutes =
+      typeof expiresInMinutes === 'number' && Number.isFinite(expiresInMinutes) && expiresInMinutes > 0
+        ? Math.min(Math.round(expiresInMinutes), 60 * 24 * 365)
+        : null;
+    const expiresAt = validMinutes ? new Date(Date.now() + validMinutes * 60_000).toISOString() : undefined;
+
+    const invite: InviteLink = {
+      code,
+      serverId: server.id,
+      createdBy: userId,
+      uses: 0,
+      maxUses: 0,
+      temporary: false,
+      expiresAt,
+      isDefault: false,
+      isCustom: true,
+    };
+    server.invites.unshift(invite);
+    this.appendAudit(
+      server,
+      userId,
+      'Created Custom Invite Link',
+      code,
+      validMinutes ? `Expires in ${this.formatExpiryLabel(validMinutes)}` : 'Never expires'
+    );
+
+    let message: Message | undefined;
+    if (postToBotCmd) {
+      const botCmdChannel =
+        (server.botCmdChannelId && server.channels.find((c) => c.id === server.botCmdChannelId)) ||
+        server.channels.find((c) => c.isBotCmdChannel) ||
+        server.channels[0];
+      if (botCmdChannel) {
+        if (!this.messages[botCmdChannel.id]) this.messages[botCmdChannel.id] = [];
+        message = this.buildCustomInviteEmbedMessage(botCmdChannel.id, undefined, user, server, invite, validMinutes);
+        this.messages[botCmdChannel.id].push(message);
+      }
+    }
+
+    this.scheduleSave();
+    return { server, invite, message };
+  }
+
+  private buildCustomInviteEmbedMessage(
+    channelId: string,
+    threadId: string | undefined,
+    author: User | undefined,
+    server: Server,
+    invite: InviteLink,
+    validMinutes: number | null
+  ): Message {
+    const expiryLabel = this.formatExpiryLabel(validMinutes);
+    return {
+      id: `msg-${crypto.randomBytes(6).toString('hex')}`,
+      channelId,
+      threadId,
+      authorId: 'bot-relay',
+      content: '',
+      embed: {
+        title: `Custom Invite Link for ${author?.displayName || 'Member'}`,
+        description: `Share your personal custom link: \`https://livechatter.app/invite/${invite.code}\`\n\nWhenever a new person joins **${server.name}** using **this custom link**, your personal invite count increases by **+1** (check anytime with \`-i\`).`,
+        fields: [
+          { name: 'Custom Invite Code', value: invite.code },
+          { name: 'Link Expiry', value: invite.expiresAt ? `${expiryLabel} (${new Date(invite.expiresAt).toLocaleString()})` : 'Never expires' },
+          { name: 'Tracked Invite Count', value: 'Counts +1 per new member who joins with this link' },
+        ],
+        footer: 'Custom Personal Invite · Default server link joins do not count',
+      },
+      createdAt: new Date().toISOString(),
+      reactions: [],
+      attachments: [],
+    };
   }
 
   private loadFromDisk() {
@@ -151,6 +440,12 @@ export class LiveChatterStore {
         this.friendsByUser = parsed.friendsByUser || this.friendsByUser;
         if (Array.isArray(parsed.friendInvites) && parsed.friendInvites.length > 0) {
           this.friendInvites = parsed.friendInvites;
+        }
+        if (Array.isArray(parsed.tickets)) {
+          this.tickets = parsed.tickets;
+        }
+        if (typeof parsed.ticketCounter === 'number' && parsed.ticketCounter >= 1001) {
+          this.ticketCounter = parsed.ticketCounter;
         }
         this.inboxByUser = parsed.inboxByUser || this.inboxByUser;
         this.mutedByUser = parsed.mutedByUser || this.mutedByUser;
@@ -179,6 +474,8 @@ export class LiveChatterStore {
               dms: this.dms,
               friendsByUser: this.friendsByUser,
               friendInvites: this.friendInvites,
+              tickets: this.tickets,
+              ticketCounter: this.ticketCounter,
               inboxByUser: this.inboxByUser,
               mutedByUser: this.mutedByUser,
               authRecords: this.authRecords,
@@ -312,12 +609,34 @@ export class LiveChatterStore {
       });
     }
 
+    // New users start with NO human friends — only the LiveChatter Help Bot
     this.friendsByUser[userId] = [
-      { userId: 'user-alex', status: 'accepted', createdAt: new Date().toISOString() },
+      { userId: 'bot-help', status: 'accepted', createdAt: new Date().toISOString() },
     ];
     this.inboxByUser[userId] = [];
     this.mutedByUser[userId] = [];
     this.unreadByUser[userId] = [];
+
+    // Open an automatic welcome DM with LiveChatter Help Bot
+    const helpDmId = `dm-help-${crypto.randomBytes(4).toString('hex')}`;
+    const nowIso = new Date().toISOString();
+    this.dms.unshift({
+      id: helpDmId,
+      isGroup: false,
+      participantIds: [userId, 'bot-help'],
+      lastMessageAt: nowIso,
+    });
+    this.messages[helpDmId] = [
+      {
+        id: `msg-${crypto.randomBytes(6).toString('hex')}`,
+        channelId: helpDmId,
+        authorId: 'bot-help',
+        content: `Welcome to **LiveChatter**, **${newUser.displayName}**! 👋\n\nI’m the **LiveChatter Help Bot** — right now I’m the only contact in your Friends list until you add or invite people.\n\n**Quick ways to get started:**\n- **Invite friends on their phone**: Click **Invite Friends** to send your invite code on **WhatsApp**, **Gmail**, or **Messages**.\n- **Redeem an invite code**: Got a code from a friend? Click **Redeem Code** in the Friends tab.\n- **Need help in a server?**: Every server includes **Ticket Bot** so you can open a personal ticket for queries, help, or collecting invite rewards.\n\nReply here anytime with keywords like \`invites\`, \`tickets\`, \`friends\`, or \`servers\` and I’ll guide you!`,
+        createdAt: nowIso,
+        reactions: [],
+        attachments: [],
+      },
+    ];
 
     this.scheduleSave();
     return this.issueSession(userId, 'Web Browser');
@@ -355,6 +674,7 @@ export class LiveChatterStore {
       dms: userDms,
       friends: this.friendsByUser[userId] || [],
       friendInvites: this.friendInvites.filter((inv) => inv.creatorId === userId),
+      tickets: this.tickets.filter((t) => this.canAccessTicket(userId, t)),
       voiceParticipants: this.voiceParticipants,
       whiteboardStrokes: this.whiteboardStrokes,
       botDirectory: this.botDirectory,
@@ -438,7 +758,36 @@ export class LiveChatterStore {
     poll?: PollData;
     voiceClip?: VoiceClip;
     forwardedFrom?: { channelName: string; authorName: string };
-  }): { messages: Message[]; serverUpdated?: Server; inboxItem?: InboxItem } {
+  }): { messages: Message[]; serverUpdated?: Server; inboxItem?: InboxItem; createdTicket?: SupportTicket } {
+    // Support personal Ticket Bot conversations
+    const ticket = this.tickets.find((t) => t.id === input.channelId);
+    if (ticket) {
+      if (!this.canAccessTicket(input.userId, ticket)) {
+        throw new Error('You do not have permission to access this personal ticket.');
+      }
+      if (ticket.status === 'closed') {
+        throw new Error('This ticket is closed. Reopen it to send new messages.');
+      }
+      const trimmed = input.content.trim();
+      if (!trimmed && (!input.attachments || input.attachments.length === 0)) {
+        throw new Error('Message cannot be empty.');
+      }
+      if (!this.messages[ticket.id]) this.messages[ticket.id] = [];
+      const msg: Message = {
+        id: `msg-${crypto.randomBytes(6).toString('hex')}`,
+        channelId: ticket.id,
+        authorId: input.userId,
+        content: trimmed.slice(0, 4000),
+        createdAt: new Date().toISOString(),
+        reactions: [],
+        attachments: (input.attachments || []).slice(0, 4),
+      };
+      this.messages[ticket.id].push(msg);
+      ticket.updatedAt = msg.createdAt;
+      this.scheduleSave();
+      return { messages: [msg] };
+    }
+
     const loc = this.getChannelLocation(input.channelId);
     if (!loc.channel && !loc.dm) throw new Error('Channel not found');
 
@@ -494,16 +843,32 @@ export class LiveChatterStore {
     const bucketKey = input.threadId || input.channelId;
     if (!this.messages[bucketKey]) this.messages[bucketKey] = [];
 
-    if (trimmed.startsWith('/') && !input.poll && !input.voiceClip) {
-      const botMsg = this.handleSlashCommand(trimmed, input.userId, input.channelId, input.threadId, loc.server);
-      if (botMsg) {
-        this.messages[bucketKey].push(botMsg);
+    const isBotCommand = !input.poll && !input.voiceClip && (trimmed.startsWith('/') || /^-i(\s|$)/i.test(trimmed));
+    if (isBotCommand) {
+      if (loc.server && loc.channel) {
+        const isBotCmdChannel =
+          Boolean(loc.channel.isBotCmdChannel) || loc.channel.id === loc.server.botCmdChannelId;
+        if (!isBotCmdChannel) {
+          const targetCmdChannel =
+            (loc.server.botCmdChannelId && loc.server.channels.find((c) => c.id === loc.server!.botCmdChannelId)) ||
+            loc.server.channels.find((c) => c.isBotCmdChannel);
+          throw new Error(
+            `Bot commands can only be entered in #${targetCmdChannel?.name || 'bot-cmd'}.`
+          );
+        }
+      }
+
+      const beforeTicketCount = this.tickets.length;
+      const cmdResult = this.handleSlashCommand(trimmed, input.userId, input.channelId, input.threadId, loc.server);
+      if (cmdResult) {
+        this.messages[bucketKey].push(cmdResult.message);
         if (input.threadId) {
           const thr = this.threads.find((t) => t.id === input.threadId);
-          if (thr) thr.lastActivityAt = botMsg.createdAt;
+          if (thr) thr.lastActivityAt = cmdResult.message.createdAt;
         }
+        const createdTicket = this.tickets.length > beforeTicketCount ? this.tickets[0] : undefined;
         this.scheduleSave();
-        return { messages: [botMsg] };
+        return { messages: [cmdResult.message], createdTicket, serverUpdated: cmdResult.serverUpdated };
       }
     }
 
@@ -535,10 +900,44 @@ export class LiveChatterStore {
     if (loc.dm) {
       loc.dm.lastMessageAt = msg.createdAt;
       loc.dm.isRequest = false;
+      // LiveChatter Help Bot instant automated reply in DMs
+      if (loc.dm.participantIds.includes('bot-help') && input.userId !== 'bot-help') {
+        const reply = this.buildHelpBotReply(trimmed, input.userId, loc.dm.id);
+        this.messages[bucketKey].push(reply);
+        loc.dm.lastMessageAt = reply.createdAt;
+        this.scheduleSave();
+        return { messages: [msg, reply] };
+      }
     }
 
     this.scheduleSave();
     return { messages: [msg] };
+  }
+
+  private buildHelpBotReply(userText: string, userId: string, dmId: string): Message {
+    const q = userText.toLowerCase();
+    const user = this.users[userId];
+    let text = `Hi **${user?.displayName || 'there'}**! Here’s what I can help with on LiveChatter:\n\n• **Invites** — Open **Invite Friends** to send your invite code on **WhatsApp**, **Gmail**, or **Messages**.\n• **Friends** — Add friends by username or click **Redeem Code** to accept a friend's invite code.\n• **Tickets & Rewards** — Open **Ticket Bot** in any server sidebar (or type \`/ticket\`) to create a personal ticket for queries, help, or claiming server invite rewards.\n• **Servers** — Click **+** on the left rail to create a server or join one by invite code.`;
+
+    if (q.includes('invite') || q.includes('whatsapp') || q.includes('gmail') || q.includes('message') || q.includes('code')) {
+      text = `**Inviting Friends via Phone (WhatsApp, Gmail, or Messages):**\n1. Open **Friends → Invite Friends** (or **Invite People** in any server menu).\n2. Copy your personal code or tap **WhatsApp**, **Gmail**, or **Messages** to send it straight to their phone.\n3. When they tap the link or enter the code under **Redeem Code**, you’ll be connected automatically — and if you attached a server, your server invite count increases for invite rewards!`;
+    } else if (q.includes('ticket') || q.includes('reward') || q.includes('claim')) {
+      text = `**Using Ticket Bot & Claiming Invite Rewards:**\n1. Open any server and click **Ticket Bot** at the top of the channel sidebar (or type \`/ticket\` in chat).\n2. Click **New Personal Ticket** and pick **General Query**, **Help & Support**, or **Collect Invite Reward**.\n3. Your ticket is completely private between you and the server staff. Server owners can configure invite reward tiers anytime under **Server Settings → Ticket Bot & Rewards**.`;
+    } else if (q.includes('friend') || q.includes('add')) {
+      text = `**Adding Friends:**\nNew accounts start with only me (Help Bot) so your Friends list stays clean and private. Go to **Home → Friends** to add someone by username, send your invite code over **WhatsApp / Gmail / Messages**, or click **Redeem Code** if a friend sent you one.`;
+    } else if (q.includes('server') || q.includes('create') || q.includes('join')) {
+      text = `**Creating or Joining Servers:**\nClick the **+** button on the left server rail to create a server from a template (Gaming, Study, Open Source, Friends, Creators) or join via an invite code. Every server you create automatically includes **Ticket Bot** ready for personal support tickets and invite rewards!`;
+    }
+
+    return {
+      id: `msg-${crypto.randomBytes(6).toString('hex')}`,
+      channelId: dmId,
+      authorId: 'bot-help',
+      content: text,
+      createdAt: new Date(Date.now() + 250).toISOString(),
+      reactions: [],
+      attachments: [],
+    };
   }
 
   private handleSlashCommand(
@@ -547,8 +946,9 @@ export class LiveChatterStore {
     channelId: string,
     threadId: string | undefined,
     server?: Server
-  ): Message | null {
-    const [cmd, ...restParts] = raw.split(/\s+/);
+  ): { message: Message; serverUpdated?: Server } | null {
+    const [rawCmd, ...restParts] = raw.split(/\s+/);
+    const cmd = rawCmd.toLowerCase();
     const rest = restParts.join(' ').trim();
     const author = this.users[userId];
     const base = {
@@ -561,6 +961,71 @@ export class LiveChatterStore {
       attachments: [],
     };
 
+    // -i command: Check verified personal invite count (counts ONLY joins via personal custom links)
+    if (cmd === '-i' && server) {
+      let targetUser: User | undefined = author;
+      if (rest) {
+        const lookup = rest.replace(/^@/, '').toLowerCase();
+        const matchedMember = server.members.find((m) => {
+          const u = this.users[m.userId];
+          return u && (u.username.toLowerCase() === lookup || u.displayName.toLowerCase().includes(lookup));
+        });
+        if (matchedMember) {
+          targetUser = this.users[matchedMember.userId];
+        }
+      }
+      const targetId = targetUser?.id || userId;
+      const inviteCount = server.memberInviteCounts?.[targetId] || 0;
+      const customLinks = server.invites.filter((inv) => inv.isCustom && !inv.isDefault && inv.createdBy === targetId);
+      const totalCustomUses = customLinks.reduce((sum, inv) => sum + inv.uses, 0);
+
+      const fields: { name: string; value: string }[] = [
+        { name: 'Verified Invites', value: `${inviteCount} ${inviteCount === 1 ? 'person' : 'people'}` },
+        { name: 'Personal Custom Links', value: `${customLinks.length} created (${totalCustomUses} uses)` },
+      ];
+
+      if (server.ticketBot?.inviteRewardsEnabled && server.ticketBot.inviteRewards.length > 0) {
+        const sortedTiers = [...server.ticketBot.inviteRewards].sort((a, b) => a.requiredInvites - b.requiredInvites);
+        const nextTier = sortedTiers.find((t) => inviteCount < t.requiredInvites);
+        const unlockedCount = sortedTiers.filter((t) => inviteCount >= t.requiredInvites).length;
+        fields.push({
+          name: 'Invite Rewards',
+          value: nextTier
+            ? `${unlockedCount} unlocked · Next: ${nextTier.title} (${inviteCount}/${nextTier.requiredInvites})`
+            : `All ${unlockedCount} reward tiers unlocked! Claim via Ticket Bot.`,
+        });
+      }
+
+      return {
+        message: {
+          ...base,
+          content: '',
+          embed: {
+            title: `Invite Tracker — ${targetUser?.displayName || 'Member'}`,
+            description: `**${targetUser?.displayName || 'Member'}** currently has **${inviteCount}** verified ${
+              inviteCount === 1 ? 'invite' : 'invites'
+            } in **${server.name}**.\n\n*Only people who join using your personal custom \`/invite link\` count toward this total. Joins via the default server link are not counted.*`,
+            fields,
+            footer: 'Command: -i · Create your own tracked link with /invite link',
+          },
+        },
+      };
+    }
+
+    // /invite link [expiry] command: Generate personal custom invite link with expiry period (Never enabled)
+    if (cmd === '/invite' && server) {
+      const sub = (restParts[0] || '').toLowerCase();
+      if (sub === 'link' || !sub) {
+        const expiryArg = sub === 'link' ? restParts.slice(1).join(' ') : '';
+        const parsed = this.parseInviteExpiryArg(expiryArg);
+        const { invite } = this.createCustomServerInvite(userId, server.id, parsed.minutes, false);
+        return {
+          message: this.buildCustomInviteEmbedMessage(channelId, threadId, author, server, invite, parsed.minutes),
+          serverUpdated: server,
+        };
+      }
+    }
+
     if (cmd === '/poll') {
       const parts = rest.split('|').map((s) => s.trim()).filter(Boolean);
       const question = parts[0] || 'Quick Community Poll';
@@ -570,13 +1035,15 @@ export class LiveChatterStore {
         voterIds: [],
       }));
       return {
-        ...base,
-        content: `Poll created by **${author?.displayName || 'Member'}**`,
-        poll: {
-          question,
-          options,
-          expiresAt: new Date(Date.now() + 24 * 3_600_000).toISOString(),
-          allowMultiple: false,
+        message: {
+          ...base,
+          content: `Poll created by **${author?.displayName || 'Member'}**`,
+          poll: {
+            question,
+            options,
+            expiresAt: new Date(Date.now() + 24 * 3_600_000).toISOString(),
+            allowMultiple: false,
+          },
         },
       };
     }
@@ -588,28 +1055,34 @@ export class LiveChatterStore {
       const rolls = Array.from({ length: count }, () => Math.floor(Math.random() * sides) + 1);
       const total = rolls.reduce((a, b) => a + b, 0);
       return {
-        ...base,
-        content: `**${author?.displayName}** rolled \`${count}d${sides}\` → **${total}** (${rolls.join(', ')})`,
+        message: {
+          ...base,
+          content: `**${author?.displayName}** rolled \`${count}d${sides}\` → **${total}** (${rolls.join(', ')})`,
+        },
       };
     }
 
     if (cmd === '/coinflip') {
       const result = Math.random() < 0.5 ? 'Heads' : 'Tails';
       return {
-        ...base,
-        content: `**${author?.displayName}** flipped a coin → **${result}**`,
+        message: {
+          ...base,
+          content: `**${author?.displayName}** flipped a coin → **${result}**`,
+        },
       };
     }
 
     if (cmd === '/remind') {
       return {
-        ...base,
-        content: '',
-        embed: {
-          title: 'Scheduled Reminder',
-          description: rest || 'Follow up with the team in this channel.',
-          fields: [{ name: 'Set by', value: author?.displayName || 'Member' }],
-          footer: 'Relay Utility · Slash Command',
+        message: {
+          ...base,
+          content: '',
+          embed: {
+            title: 'Scheduled Reminder',
+            description: rest || 'Follow up with the team in this channel.',
+            fields: [{ name: 'Set by', value: author?.displayName || 'Member' }],
+            footer: 'Relay Utility · Bot Command',
+          },
         },
       };
     }
@@ -620,37 +1093,73 @@ export class LiveChatterStore {
         return st && st !== 'offline' && st !== 'invisible';
       }).length;
       return {
-        ...base,
-        content: '',
-        embed: {
-          title: server.name,
-          description: server.description,
-          fields: [
-            { name: 'Members', value: `${server.members.length} total (${onlineCount} online)` },
-            { name: 'Channels', value: `${server.channels.length} channels` },
-            { name: 'Roles', value: `${server.roles.length} roles` },
-            { name: 'Category', value: `${server.category} · ${server.language}` },
-          ],
-          footer: `Vanity invite: livechatter.app/invite/${server.vanityCode || server.invites[0]?.code || server.id}`,
+        message: {
+          ...base,
+          content: '',
+          embed: {
+            title: server.name,
+            description: server.description,
+            fields: [
+              { name: 'Members', value: `${server.members.length} total (${onlineCount} online)` },
+              { name: 'Channels', value: `${server.channels.length} channels` },
+              { name: 'Roles', value: `${server.roles.length} roles` },
+              { name: 'Category', value: `${server.category} · ${server.language}` },
+            ],
+            footer: `Default server invite: livechatter.app/invite/${this.getDefaultInviteCode(server)}`,
+          },
+        },
+      };
+    }
+
+    if (cmd === '/ticket' && server) {
+      const subject = rest || 'General support request';
+      const { ticket } = this.createTicket(userId, server.id, {
+        category: 'help',
+        subject,
+        details: `Opened via /ticket command by @${author?.username || 'member'}.`,
+      });
+      return {
+        message: {
+          ...base,
+          authorId: 'bot-ticket',
+          content: '',
+          embed: {
+            title: `Personal Ticket #TKT-${ticket.ticketNumber} Created`,
+            description: `**${author?.displayName}**, your private personal ticket is ready. Click **Ticket Bot** in the sidebar to chat privately with server staff.`,
+            fields: [
+              { name: 'Subject', value: ticket.subject },
+              { name: 'Category', value: 'Help & Support' },
+              { name: 'Privacy', value: 'Visible only to you and server staff' },
+            ],
+            footer: 'Ticket Bot · Automatically installed in every server',
+          },
         },
       };
     }
 
     if (cmd === '/help') {
+      const cmdChannelName = server?.botCmdConfig?.channelName || 'bot-cmd';
       return {
-        ...base,
-        content: '',
-        embed: {
-          title: 'Available Slash Commands',
-          description: 'Run deterministic utility commands directly from any message composer.',
-          fields: [
-            { name: '/poll Question | Option A | Option B', value: 'Create a live interactive poll' },
-            { name: '/roll 2d6', value: 'Roll up to 10 dice (default 1d20)' },
-            { name: '/coinflip', value: 'Flip a fair coin' },
-            { name: '/remind Note', value: 'Post a formatted reminder card' },
-            { name: '/serverinfo', value: 'Show current server statistics' },
-          ],
-          footer: 'Relay Utility · Free for all servers',
+        message: {
+          ...base,
+          content: '',
+          embed: {
+            title: 'Available Bot Commands',
+            description: server
+              ? `All server bot commands must be run inside **#${cmdChannelName}**.`
+              : 'Run utility commands directly in the composer.',
+            fields: [
+              { name: '-i [@user]', value: 'Check verified personal invites (custom invite links only)' },
+              { name: '/invite link [never|30m|1h|6h|24h|7d|30d]', value: 'Create your personal tracked custom invite link' },
+              { name: '/ticket [subject]', value: 'Open a private personal ticket with Ticket Bot' },
+              { name: '/poll Question | Option A | Option B', value: 'Create a live interactive poll' },
+              { name: '/roll 2d6', value: 'Roll up to 10 dice (default 1d20)' },
+              { name: '/coinflip', value: 'Flip a fair coin' },
+              { name: '/remind Note', value: 'Post a formatted reminder card' },
+              { name: '/serverinfo', value: 'Show current server statistics' },
+            ],
+            footer: 'Relay Utility & Ticket Bot · Free for all servers',
+          },
         },
       };
     }
@@ -662,8 +1171,15 @@ export class LiveChatterStore {
     const bucket = this.messages[threadId || channelId] || [];
     const msg = bucket.find((m) => m.id === messageId);
     if (!msg) throw new Error('Message not found');
-    if (msg.authorId !== userId) throw new Error('You can only edit your own messages.');
-    msg.content = content.trim().slice(0, 4000);
+    if (this.users[msg.authorId]?.isBot) {
+      throw new Error('Bot messages cannot be edited.');
+    }
+    if (msg.authorId !== userId) {
+      throw new Error('Only the original message poster can edit this message.');
+    }
+    const clean = content.trim().slice(0, 4000);
+    if (!clean) throw new Error('Message content cannot be empty.');
+    msg.content = clean;
     msg.editedAt = new Date().toISOString();
     this.scheduleSave();
     return msg;
@@ -813,12 +1329,26 @@ export class LiveChatterStore {
     category?: Server['category'];
     description?: string;
     iconColor?: string;
+    botCmdSetup?: { channelName: string; enabledCommands?: string[] };
   }): Server {
     const id = `srv-${crypto.randomBytes(4).toString('hex')}`;
     const cat1 = `cat-${crypto.randomBytes(3).toString('hex')}`;
     const cat2 = `cat-${crypto.randomBytes(3).toString('hex')}`;
     const ownerRoleId = `role-${crypto.randomBytes(3).toString('hex')}`;
     const everyoneRoleId = `role-${crypto.randomBytes(3).toString('hex')}`;
+
+    const rawBotCmdName = input.botCmdSetup?.channelName?.trim() || 'bot-cmd';
+    const cleanBotCmdName =
+      rawBotCmdName.toLowerCase().replace(/[^a-z0-9-_]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'bot-cmd';
+    const enabledCommands = Array.from(
+      new Set([
+        '-i',
+        '/invite link',
+        ...(input.botCmdSetup?.enabledCommands && input.botCmdSetup.enabledCommands.length > 0
+          ? input.botCmdSetup.enabledCommands
+          : ['/ticket', '/poll', '/roll', '/coinflip', '/remind', '/serverinfo', '/help']),
+      ])
+    );
 
     const templateChannels: Record<string, { name: string; type: ChannelType; topic: string; cat: string }[]> = {
       blank: [
@@ -868,6 +1398,21 @@ export class LiveChatterStore {
       availableTags: ch.type === 'forum' ? ['Discussion', 'Question', 'Resource'] : undefined,
       guidelines: ch.type === 'forum' ? 'Add a descriptive title and select relevant tags.' : undefined,
     }));
+
+    const botCmdChannel: Channel = {
+      id: `ch-${crypto.randomBytes(4).toString('hex')}`,
+      serverId: id,
+      categoryId: cat1,
+      name: cleanBotCmdName,
+      type: 'text',
+      topic: 'Dedicated bot command channel — run -i, /invite link, and all bot commands here.',
+      position: channels.length,
+      slowmodeSeconds: 0,
+      isPrivate: false,
+      ageRestricted: false,
+      isBotCmdChannel: true,
+    };
+    channels.push(botCmdChannel);
 
     const inviteCode = `${input.name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10) || 'server'}-${crypto.randomBytes(2).toString('hex')}`;
 
@@ -938,6 +1483,7 @@ export class LiveChatterStore {
       members: [
         { userId: input.ownerId, roleIds: [ownerRoleId], joinedAt: new Date().toISOString(), rulesAccepted: true },
         { userId: 'bot-relay', roleIds: [everyoneRoleId], joinedAt: new Date().toISOString(), rulesAccepted: true },
+        { userId: 'bot-ticket', roleIds: [everyoneRoleId], joinedAt: new Date().toISOString(), rulesAccepted: true },
       ],
       bannedUserIds: [],
       autoModRules: [],
@@ -949,6 +1495,20 @@ export class LiveChatterStore {
           target: input.name.trim(),
           createdAt: new Date().toISOString(),
         },
+        {
+          id: `al-${crypto.randomBytes(4).toString('hex')}`,
+          actorId: input.ownerId,
+          action: 'Configured Bot Commands',
+          target: `#${cleanBotCmdName} (${enabledCommands.join(', ')})`,
+          createdAt: new Date().toISOString(),
+        },
+        {
+          id: `al-${crypto.randomBytes(4).toString('hex')}`,
+          actorId: 'bot-ticket',
+          action: 'Auto-Installed Bot',
+          target: 'Ticket Bot (Personal Tickets & Invite Rewards)',
+          createdAt: new Date().toISOString(),
+        },
       ],
       events: [],
       invites: [
@@ -956,26 +1516,58 @@ export class LiveChatterStore {
           code: inviteCode,
           serverId: id,
           createdBy: input.ownerId,
-          uses: 1,
+          uses: 0,
           maxUses: 0,
           temporary: false,
+          isDefault: true,
+          isCustom: false,
         },
       ],
       webhooks: [],
-      installedBotIds: ['bot-relay'],
+      installedBotIds: ['bot-relay', 'bot-ticket'],
+      ticketBot: {
+        enabled: true,
+        welcomeMessage:
+          'Need help, have a question, or want to claim an invite reward? Generate a personal ticket below and server staff will respond privately.',
+        inviteRewardsEnabled: false,
+        inviteRewards: [],
+      },
+      memberInviteCounts: {},
+      botCmdChannelId: botCmdChannel.id,
+      botCmdConfig: {
+        channelName: cleanBotCmdName,
+        enabledCommands,
+      },
     };
 
     this.servers.push(server);
-    const firstText = channels.find((c) => c.type === 'text' || c.type === 'announcement');
+    this.ensurePinnedDefaultInviteMessage(server, botCmdChannel, inviteCode);
+
+    const firstText = channels.find((c) => !c.isBotCmdChannel && (c.type === 'text' || c.type === 'announcement'));
     if (firstText) {
       this.messages[firstText.id] = [
         {
           id: `msg-${crypto.randomBytes(6).toString('hex')}`,
           channelId: firstText.id,
           authorId: 'bot-relay',
-          content: `Welcome to **${server.name}**! Invite friends using code \`${inviteCode}\`, or type \`/help\` to explore slash commands.`,
+          content: `Welcome to **${server.name}**! Run bot commands like \`-i\` and \`/invite link\` inside **#${cleanBotCmdName}**, where the default server link (\`${inviteCode}\`) is pinned at the top.`,
           createdAt: new Date().toISOString(),
           reactions: [{ emoji: '👋', userIds: [input.ownerId] }],
+          attachments: [],
+        },
+        {
+          id: `msg-${crypto.randomBytes(6).toString('hex')}`,
+          channelId: firstText.id,
+          authorId: 'bot-ticket',
+          content: '',
+          embed: {
+            title: 'Ticket Bot Automatically Installed',
+            description:
+              `Members can open **personal tickets** anytime from **Ticket Bot** in the sidebar (or with \`/ticket\` inside **#${cleanBotCmdName}**) for queries, help, or collecting invite rewards. Server owners can configure invite rewards under **Server Settings → Ticket Bot & Rewards**.`,
+            footer: 'Ticket Bot · Private personal support desk',
+          },
+          createdAt: new Date(Date.now() + 100).toISOString(),
+          reactions: [],
           attachments: [],
         },
       ];
@@ -985,14 +1577,35 @@ export class LiveChatterStore {
   }
 
   public joinByInviteOrDiscovery(userId: string, codeOrDiscoveryId: string): Server {
-    const clean = codeOrDiscoveryId.trim().toLowerCase().replace(/^https?:\/\/[^/]+\/invite\//, '');
+    let clean = codeOrDiscoveryId.trim();
+    const queryMatch = clean.match(/[?&]invite=([A-Za-z0-9_-]+)/i);
+    if (queryMatch) {
+      clean = queryMatch[1];
+    } else {
+      clean = clean.replace(/^https?:\/\/[^/]+\/invite\//i, '').replace(/\/+$/, '');
+    }
+    const cleanLower = clean.toLowerCase();
+
     const existing = this.servers.find(
-      (s) => s.vanityCode?.toLowerCase() === clean || s.invites.some((i) => i.code.toLowerCase() === clean) || s.id === codeOrDiscoveryId
+      (s) =>
+        s.invites.some((i) => i.code.toLowerCase() === cleanLower) ||
+        s.vanityCode?.toLowerCase() === cleanLower ||
+        s.id === codeOrDiscoveryId
     );
     if (existing) {
       if (existing.bannedUserIds.includes(userId)) {
         throw new Error('You are banned from this server.');
       }
+      const inv = existing.invites.find((i) => i.code.toLowerCase() === cleanLower);
+      if (inv) {
+        if (inv.expiresAt && new Date(inv.expiresAt).getTime() < Date.now()) {
+          throw new Error('This invite link has expired.');
+        }
+        if (inv.maxUses > 0 && inv.uses >= inv.maxUses) {
+          throw new Error('This invite link has reached its maximum uses.');
+        }
+      }
+
       if (!existing.members.some((m) => m.userId === userId)) {
         const defaultRole = existing.roles.find((r) => r.name === '@everyone') || existing.roles[existing.roles.length - 1];
         existing.members.push({
@@ -1001,8 +1614,15 @@ export class LiveChatterStore {
           joinedAt: new Date().toISOString(),
           rulesAccepted: true,
         });
-        const inv = existing.invites.find((i) => i.code.toLowerCase() === clean);
-        if (inv) inv.uses += 1;
+        if (inv) {
+          inv.uses += 1;
+          // STRICT RULE: Only joins using a member's own personal custom invite link increase their invite count.
+          // Joins using the default server link (isDefault: true or !isCustom) MUST NOT increase anyone's invite count.
+          if (inv.isCustom === true && !inv.isDefault && inv.createdBy && inv.createdBy !== userId) {
+            if (!existing.memberInviteCounts) existing.memberInviteCounts = {};
+            existing.memberInviteCounts[inv.createdBy] = (existing.memberInviteCounts[inv.createdBy] || 0) + 1;
+          }
+        }
         this.scheduleSave();
       }
       return existing;
@@ -1017,6 +1637,7 @@ export class LiveChatterStore {
         category: disc.category,
         description: disc.description,
         iconColor: disc.iconColor,
+        botCmdSetup: { channelName: 'bot-cmd' },
       });
       created.bannerUrl = disc.bannerUrl;
       this.scheduleSave();
@@ -1082,6 +1703,9 @@ export class LiveChatterStore {
       toggleBotId?: string;
       createWebhook?: { name: string; channelId: string };
       addCustomEmoji?: { name: string; symbol: string };
+      updateTicketBot?: Partial<Pick<TicketBotConfig, 'enabled' | 'welcomeMessage' | 'inviteRewardsEnabled'>>;
+      addInviteReward?: Omit<InviteRewardTier, 'id'>;
+      deleteInviteRewardId?: string;
     }
   ): Server {
     const server = this.getServer(serverId);
@@ -1208,6 +1832,52 @@ export class LiveChatterStore {
         name: patch.addCustomEmoji.name.replace(/[^a-z0-9_]/gi, '').slice(0, 20) || 'custom',
         symbol: patch.addCustomEmoji.symbol,
       });
+    }
+    if (!server.ticketBot) {
+      server.ticketBot = {
+        enabled: true,
+        welcomeMessage:
+          'Have a question, need help, or ready to claim an invite reward? Generate a personal ticket below.',
+        inviteRewardsEnabled: false,
+        inviteRewards: [],
+      };
+    }
+    if (patch.updateTicketBot) {
+      if (typeof patch.updateTicketBot.enabled === 'boolean') {
+        server.ticketBot.enabled = patch.updateTicketBot.enabled;
+      }
+      if (typeof patch.updateTicketBot.inviteRewardsEnabled === 'boolean') {
+        server.ticketBot.inviteRewardsEnabled = patch.updateTicketBot.inviteRewardsEnabled;
+        this.appendAudit(
+          server,
+          userId,
+          patch.updateTicketBot.inviteRewardsEnabled ? 'Enabled Invite Rewards' : 'Disabled Invite Rewards',
+          'Ticket Bot'
+        );
+      }
+      if (typeof patch.updateTicketBot.welcomeMessage === 'string') {
+        server.ticketBot.welcomeMessage = patch.updateTicketBot.welcomeMessage.trim().slice(0, 320);
+      }
+    }
+    if (patch.addInviteReward) {
+      const tier: InviteRewardTier = {
+        id: `rw-${crypto.randomBytes(4).toString('hex')}`,
+        title: patch.addInviteReward.title.trim().slice(0, 80) || 'Invite Reward',
+        description: patch.addInviteReward.description.trim().slice(0, 240) || 'Reward for inviting friends.',
+        requiredInvites: Math.max(1, Math.min(500, Math.floor(Number(patch.addInviteReward.requiredInvites) || 1))),
+        roleId: patch.addInviteReward.roleId || undefined,
+      };
+      server.ticketBot.inviteRewards.push(tier);
+      server.ticketBot.inviteRewards.sort((a, b) => a.requiredInvites - b.requiredInvites);
+      server.ticketBot.inviteRewardsEnabled = true;
+      this.appendAudit(server, userId, 'Added Invite Reward', `${tier.title} (${tier.requiredInvites} invites)`);
+    }
+    if (patch.deleteInviteRewardId) {
+      const target = server.ticketBot.inviteRewards.find((r) => r.id === patch.deleteInviteRewardId);
+      server.ticketBot.inviteRewards = server.ticketBot.inviteRewards.filter((r) => r.id !== patch.deleteInviteRewardId);
+      if (target) {
+        this.appendAudit(server, userId, 'Removed Invite Reward', target.title);
+      }
     }
 
     this.scheduleSave();
@@ -1443,11 +2113,18 @@ export class LiveChatterStore {
       const dm = this.createOrOpenDm(userId, [creator.id]);
       if (dm.isRequest) dm.isRequest = false;
 
-      // Also join attached server if present
+      // Also join attached server if present & credit creator's server invite count
       let joinedServer: Server | undefined;
       if (friendInvite.serverId) {
         try {
+          const targetSrv = this.getServer(friendInvite.serverId);
+          const wasMember = targetSrv?.members.some((m) => m.userId === userId);
           joinedServer = this.joinByInviteOrDiscovery(userId, friendInvite.serverId);
+          if (joinedServer && !wasMember && friendInvite.creatorId !== userId) {
+            if (!joinedServer.memberInviteCounts) joinedServer.memberInviteCounts = {};
+            joinedServer.memberInviteCounts[friendInvite.creatorId] =
+              (joinedServer.memberInviteCounts[friendInvite.creatorId] || 0) + 1;
+          }
         } catch {
           // Ignore if already joined or unavailable
         }
@@ -1461,6 +2138,228 @@ export class LiveChatterStore {
     // Fallback: check if it's a server invite code
     const server = this.joinByInviteOrDiscovery(userId, clean);
     return { kind: 'server', server };
+  }
+
+  public isTicketStaff(userId: string, server: Server): boolean {
+    return (
+      server.ownerId === userId ||
+      this.hasPermission(server, userId, 'ADMINISTRATOR') ||
+      this.hasPermission(server, userId, 'MANAGE_SERVER') ||
+      this.hasPermission(server, userId, 'MANAGE_MESSAGES')
+    );
+  }
+
+  public canAccessTicket(userId: string, ticket: SupportTicket): boolean {
+    if (ticket.creatorId === userId) return true;
+    const server = this.getServer(ticket.serverId);
+    if (!server) return false;
+    return this.isTicketStaff(userId, server);
+  }
+
+  public getTicket(ticketId: string): SupportTicket | undefined {
+    return this.tickets.find((t) => t.id === ticketId);
+  }
+
+  public createTicket(
+    userId: string,
+    serverId: string,
+    input: {
+      category: TicketCategory;
+      subject: string;
+      details: string;
+      rewardTierId?: string;
+    }
+  ): { ticket: SupportTicket; initialMessage: Message } {
+    const server = this.getServer(serverId);
+    if (!server) throw new Error('Server not found.');
+    if (!server.members.some((m) => m.userId === userId)) {
+      throw new Error('You must be a member of this server to open a ticket.');
+    }
+
+    const category: TicketCategory =
+      input.category === 'query' || input.category === 'help' || input.category === 'invite_reward'
+        ? input.category
+        : 'help';
+    const subject = input.subject.trim().slice(0, 120);
+    if (!subject) throw new Error('Please enter a subject for your ticket.');
+
+    let rewardTier: InviteRewardTier | undefined;
+    if (category === 'invite_reward') {
+      if (!server.ticketBot?.inviteRewardsEnabled || !server.ticketBot.inviteRewards.length) {
+        throw new Error('The server owner has not set up invite rewards for this server yet.');
+      }
+      rewardTier =
+        server.ticketBot.inviteRewards.find((r) => r.id === input.rewardTierId) ||
+        server.ticketBot.inviteRewards[0];
+    }
+
+    const nowIso = new Date().toISOString();
+    const ticketNumber = this.ticketCounter++;
+    const ticket: SupportTicket = {
+      id: `tkt-${crypto.randomBytes(5).toString('hex')}`,
+      ticketNumber,
+      serverId: server.id,
+      creatorId: userId,
+      category,
+      subject,
+      status: 'open',
+      rewardTierId: rewardTier?.id,
+      rewardTitle: rewardTier?.title,
+      rewardFulfilled: false,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    const author = this.users[userId];
+    const inviteCount = server.memberInviteCounts?.[userId] || 0;
+    const categoryLabel =
+      category === 'invite_reward'
+        ? 'Collect Invite Reward'
+        : category === 'query'
+        ? 'General Query'
+        : 'Help & Support';
+
+    const fields: { name: string; value: string }[] = [
+      { name: 'Opened by', value: `${author?.displayName || 'Member'} (@${author?.username || 'user'})` },
+      { name: 'Category', value: categoryLabel },
+      { name: 'Status', value: 'Open · Private Personal Ticket' },
+    ];
+    if (rewardTier) {
+      const eligible = inviteCount >= rewardTier.requiredInvites;
+      fields.push({
+        name: 'Requested Reward',
+        value: `${rewardTier.title} (Requires ${rewardTier.requiredInvites} invites)`,
+      });
+      fields.push({
+        name: 'Your Verified Server Invites',
+        value: `${inviteCount} / ${rewardTier.requiredInvites} — ${
+          eligible ? 'Eligible! Waiting for staff approval.' : 'In progress (share your invite code to reach the goal!)'
+        }`,
+      });
+    }
+
+    const initialMessage: Message = {
+      id: `msg-${crypto.randomBytes(6).toString('hex')}`,
+      channelId: ticket.id,
+      authorId: 'bot-ticket',
+      content: input.details.trim()
+        ? `**Member message:** ${input.details.trim().slice(0, 2000)}`
+        : '',
+      embed: {
+        title: `Ticket #TKT-${ticketNumber} — ${subject}`,
+        description:
+          server.ticketBot?.welcomeMessage ||
+          'Thank you for opening a personal ticket. Server staff have been notified and will reply privately right here.',
+        fields,
+        footer: `Ticket Bot · ${server.name}`,
+      },
+      createdAt: nowIso,
+      reactions: [],
+      attachments: [],
+    };
+
+    this.tickets.unshift(ticket);
+    this.messages[ticket.id] = [initialMessage];
+
+    // Notify server owner in inbox if someone else opened a ticket
+    if (server.ownerId !== userId) {
+      const ownerInbox = this.inboxByUser[server.ownerId] || [];
+      ownerInbox.unshift({
+        id: `inb-${crypto.randomBytes(4).toString('hex')}`,
+        type: 'event',
+        title: `New Ticket #TKT-${ticketNumber} (${categoryLabel})`,
+        preview: `${author?.displayName || 'A member'}: ${subject}`,
+        serverId: server.id,
+        createdAt: nowIso,
+        read: false,
+      });
+      this.inboxByUser[server.ownerId] = ownerInbox;
+    }
+
+    this.scheduleSave();
+    return { ticket, initialMessage };
+  }
+
+  public updateTicket(
+    userId: string,
+    ticketId: string,
+    patch: { status?: TicketStatus; approveReward?: boolean }
+  ): { ticket: SupportTicket; systemMessage?: Message; serverUpdated?: Server } {
+    const ticket = this.tickets.find((t) => t.id === ticketId);
+    if (!ticket) throw new Error('Ticket not found.');
+    const server = this.getServer(ticket.serverId);
+    if (!server) throw new Error('Server not found.');
+    const isStaff = this.isTicketStaff(userId, server);
+    if (ticket.creatorId !== userId && !isStaff) {
+      throw new Error('You do not have permission to update this ticket.');
+    }
+
+    const actor = this.users[userId];
+    const nowIso = new Date().toISOString();
+    let systemMessage: Message | undefined;
+    let serverUpdated: Server | undefined;
+
+    if (patch.approveReward) {
+      if (!isStaff) {
+        throw new Error('Only the server owner or staff can approve invite rewards.');
+      }
+      ticket.rewardFulfilled = true;
+      ticket.status = 'resolved';
+      ticket.updatedAt = nowIso;
+
+      // Grant attached reward role if configured
+      const tier = server.ticketBot?.inviteRewards.find((r) => r.id === ticket.rewardTierId);
+      if (tier?.roleId) {
+        const member = server.members.find((m) => m.userId === ticket.creatorId);
+        if (member && !member.roleIds.includes(tier.roleId)) {
+          member.roleIds.push(tier.roleId);
+          serverUpdated = server;
+        }
+      }
+      this.appendAudit(
+        server,
+        userId,
+        'Fulfilled Invite Reward',
+        `${ticket.rewardTitle || 'Reward'} → @${this.users[ticket.creatorId]?.username || ticket.creatorId}`
+      );
+      serverUpdated = server;
+
+      systemMessage = {
+        id: `msg-${crypto.randomBytes(6).toString('hex')}`,
+        channelId: ticket.id,
+        authorId: 'bot-ticket',
+        content: `🎉 **Invite Reward Approved!** **${actor?.displayName || 'Staff'}** verified and granted **${ticket.rewardTitle || 'your invite reward'}**.`,
+        createdAt: nowIso,
+        reactions: [],
+        attachments: [],
+      };
+    } else if (patch.status) {
+      ticket.status = patch.status;
+      ticket.updatedAt = nowIso;
+      if (patch.status === 'closed') ticket.closedBy = userId;
+      systemMessage = {
+        id: `msg-${crypto.randomBytes(6).toString('hex')}`,
+        channelId: ticket.id,
+        authorId: 'bot-ticket',
+        content:
+          patch.status === 'closed'
+            ? `Ticket #TKT-${ticket.ticketNumber} was **closed** by ${actor?.displayName || 'Member'}.`
+            : patch.status === 'resolved'
+            ? `Ticket #TKT-${ticket.ticketNumber} was marked **resolved** by ${actor?.displayName || 'Member'}.`
+            : `Ticket #TKT-${ticket.ticketNumber} was **reopened** by ${actor?.displayName || 'Member'}.`,
+        createdAt: nowIso,
+        reactions: [],
+        attachments: [],
+      };
+    }
+
+    if (systemMessage) {
+      if (!this.messages[ticket.id]) this.messages[ticket.id] = [];
+      this.messages[ticket.id].push(systemMessage);
+    }
+
+    this.scheduleSave();
+    return { ticket, systemMessage, serverUpdated };
   }
 
   public updateVoiceState(

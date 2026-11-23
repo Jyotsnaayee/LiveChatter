@@ -4,10 +4,12 @@ import {
   Bell,
   BellOff,
   Check,
+  Copy,
   CornerUpLeft,
   Edit3,
   Forward,
   Inbox,
+  Link2,
   Menu,
   MessageSquarePlus,
   Mic,
@@ -18,6 +20,7 @@ import {
   Send,
   Smile,
   Square,
+  Terminal,
   Trash2,
   Users,
   Volume2,
@@ -43,13 +46,26 @@ import { playSoundboardEffect, speakMessageTTS } from '../lib/audio';
 
 const QUICK_EMOJIS = ['👍', '🔥', '🚀', '✅', '👀', '❤️', '🎉', '💡', '🎧', '👏', '😄', '🛠️'];
 
-const SLASH_COMMANDS = [
+const BOT_COMMANDS = [
+  { cmd: '-i', desc: 'Check your verified invite count (custom invite links only)' },
+  { cmd: '/invite link', desc: 'Generate a personal custom invite link (select expiry period or Never)' },
+  { cmd: '/ticket', desc: 'Open a private personal ticket with Ticket Bot (e.g. /ticket Help with roles)' },
   { cmd: '/poll', desc: 'Create an interactive poll (Question | Option A | Option B)' },
   { cmd: '/roll', desc: 'Roll polyhedral dice (e.g. /roll 2d6)' },
   { cmd: '/coinflip', desc: 'Flip a fair coin' },
   { cmd: '/remind', desc: 'Post a formatted reminder card' },
   { cmd: '/serverinfo', desc: 'Display current server statistics' },
-  { cmd: '/help', desc: 'List available slash commands' },
+  { cmd: '/help', desc: 'List available bot commands' },
+];
+
+const INVITE_EXPIRY_OPTIONS: { label: string; minutes: number | null }[] = [
+  { label: 'Never', minutes: null },
+  { label: '30 Minutes', minutes: 30 },
+  { label: '1 Hour', minutes: 60 },
+  { label: '6 Hours', minutes: 360 },
+  { label: '24 Hours', minutes: 1440 },
+  { label: '7 Days', minutes: 10080 },
+  { label: '30 Days', minutes: 43200 },
 ];
 
 interface ChatViewProps {
@@ -87,6 +103,7 @@ interface ChatViewProps {
   onOpenThread: (threadId: string) => void;
   onStartThreadFromMessage: (message: Message) => Promise<void>;
   onForwardMessage: (message: Message, targetChannelId: string) => Promise<void>;
+  onCreateCustomInvite?: (expiresInMinutes: number | null) => Promise<{ code: string; expiresAt?: string } | void>;
   onTypingChange: (isTyping: boolean) => void;
 }
 
@@ -199,6 +216,7 @@ export function ChatView({
   onOpenThread,
   onStartThreadFromMessage,
   onForwardMessage,
+  onCreateCustomInvite,
   onTypingChange,
 }: ChatViewProps) {
   const [draft, setDraft] = useState('');
@@ -213,6 +231,14 @@ export function ChatView({
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [reactingMessageId, setReactingMessageId] = useState<string | null>(null);
   const [forwardingMessage, setForwardingMessage] = useState<Message | null>(null);
+
+  // Bot Command & Custom Invite Link Builder state
+  const [copiedDefaultLink, setCopiedDefaultLink] = useState(false);
+  const [showInviteLinkBuilder, setShowInviteLinkBuilder] = useState(false);
+  const [inviteExpiryMinutes, setInviteExpiryMinutes] = useState<number | null>(null);
+  const [creatingCustomInvite, setCreatingCustomInvite] = useState(false);
+  const [latestCustomInvite, setLatestCustomInvite] = useState<{ code: string; expiresAt?: string } | null>(null);
+  const [copiedCustomLink, setCopiedCustomLink] = useState(false);
 
   // Poll Builder
   const [showPollBuilder, setShowPollBuilder] = useState(false);
@@ -238,6 +264,12 @@ export function ChatView({
 
   const channelId = channel?.id || dm?.id || '';
   const density = currentUser.settings.density;
+
+  useEffect(() => {
+    setShowInviteLinkBuilder(false);
+    setLatestCustomInvite(null);
+    setComposerError(null);
+  }, [channelId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: currentUser.settings.reducedMotion ? 'auto' : 'smooth' });
@@ -291,12 +323,61 @@ export function ChatView({
     });
   }, [messages, searchQuery, users]);
 
+  const botCmdChannel = useMemo(() => {
+    if (!server) return null;
+    return (
+      (server.botCmdChannelId && server.channels.find((c) => c.id === server.botCmdChannelId)) ||
+      server.channels.find((c) => c.isBotCmdChannel) ||
+      null
+    );
+  }, [server]);
+
+  const isBotCmdChannel = Boolean(
+    server && channel && (channel.isBotCmdChannel || channel.id === server.botCmdChannelId)
+  );
+
+  const defaultInviteCode = useMemo(() => {
+    if (!server) return '';
+    const def = server.invites.find((i) => i.isDefault) || server.invites.find((i) => !i.isCustom);
+    return def?.code || server.vanityCode || server.id;
+  }, [server]);
+
+  const defaultInviteUrl = defaultInviteCode ? `${window.location.origin}/?invite=${defaultInviteCode}` : '';
+
+  const isTypingBlockedCommand = useMemo(() => {
+    if (!server || !channel || isBotCmdChannel) return false;
+    const t = draft.trim();
+    return t.startsWith('/') || /^-i(\s|$)/i.test(t);
+  }, [server, channel, isBotCmdChannel, draft]);
+
   const slashMatches = useMemo(() => {
-    if (!draft.startsWith('/')) return [];
-    const firstWord = draft.split(/\s+/)[0].toLowerCase();
-    if (draft.includes(' ')) return [];
-    return SLASH_COMMANDS.filter((c) => c.cmd.startsWith(firstWord));
-  }, [draft]);
+    if (server && !isBotCmdChannel) return [];
+    const lower = draft.toLowerCase();
+    if (!lower.startsWith('/') && !lower.startsWith('-')) return [];
+    if (lower.startsWith('/invite link ')) return [];
+    if (lower.startsWith('/invite')) {
+      return BOT_COMMANDS.filter((c) => c.cmd.startsWith('/invite'));
+    }
+    if (lower.includes(' ')) return [];
+    return BOT_COMMANDS.filter((c) => c.cmd.startsWith(lower));
+  }, [draft, server, isBotCmdChannel]);
+
+  const handleGenerateCustomInvite = async () => {
+    if (!onCreateCustomInvite || creatingCustomInvite) return;
+    setCreatingCustomInvite(true);
+    setComposerError(null);
+    try {
+      const created = await onCreateCustomInvite(inviteExpiryMinutes);
+      if (created && created.code) {
+        setLatestCustomInvite(created);
+      }
+      setDraft('');
+    } catch (err) {
+      setComposerError(err instanceof Error ? err.message : 'Unable to generate custom invite link.');
+    } finally {
+      setCreatingCustomInvite(false);
+    }
+  };
 
   const unreadInboxCount = inbox.filter((i) => !i.read).length;
 
@@ -481,7 +562,13 @@ export function ChatView({
           </button>
 
           {channel ? (
-            <ChannelIcon type={channel.type} className="h-5 w-5 shrink-0 text-slate-400 dark:text-slate-500" />
+            <ChannelIcon
+              type={channel.type}
+              isBotCmdChannel={isBotCmdChannel}
+              className={`h-5 w-5 shrink-0 ${
+                isBotCmdChannel ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400 dark:text-slate-500'
+              }`}
+            />
           ) : (
             <Users className="h-5 w-5 shrink-0 text-slate-400 dark:text-slate-500" />
           )}
@@ -749,6 +836,141 @@ export function ChatView({
         )}
       </header>
 
+      {/* Pinned Default Server Link Bar at top of #bot-cmd */}
+      {isBotCmdChannel && server && defaultInviteCode && (
+        <div className="shrink-0 border-b border-slate-200 dark:border-white/[0.08] bg-slate-50/90 dark:bg-[#171A21] px-4 py-3 space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <Pin className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />
+              <span className="text-xs font-semibold text-slate-900 dark:text-white">
+                Default Server Link (Pinned)
+              </span>
+              <code className="rounded bg-slate-200/80 dark:bg-white/8 px-2 py-0.5 font-mono text-[11px] text-slate-800 dark:text-slate-200 truncate max-w-[260px] sm:max-w-md">
+                {defaultInviteUrl}
+              </code>
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard?.writeText(defaultInviteUrl).catch(() => {});
+                  setCopiedDefaultLink(true);
+                  setTimeout(() => setCopiedDefaultLink(false), 1800);
+                }}
+                className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-white/10 bg-white dark:bg-[#232733] px-2 py-1 text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:border-[var(--accent)]"
+              >
+                {copiedDefaultLink ? <Check className="h-3 w-3 text-emerald-500" /> : <Copy className="h-3 w-3" />}
+                <span>{copiedDefaultLink ? 'Copied' : 'Copy'}</span>
+              </button>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  onSendMessage({ content: '-i' }).catch((err) =>
+                    setComposerError(err instanceof Error ? err.message : 'Unable to run -i')
+                  );
+                }}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#232733] px-2.5 py-1 font-mono text-xs font-semibold text-slate-800 dark:text-slate-100 hover:border-[var(--accent)]"
+              >
+                <Terminal className="h-3.5 w-3.5 text-emerald-500" />
+                <span>-i</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowInviteLinkBuilder((v) => !v)}
+                className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 font-mono text-xs font-semibold transition-colors ${
+                  showInviteLinkBuilder
+                    ? 'bg-[var(--accent)] text-[var(--accent-contrast)]'
+                    : 'border border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[var(--accent)] hover:bg-[var(--accent)] hover:text-[var(--accent-contrast)]'
+                }`}
+              >
+                <Link2 className="h-3.5 w-3.5" />
+                <span>/invite link</span>
+              </button>
+            </div>
+          </div>
+          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+            Joins through this default server link do <strong>not</strong> count toward personal invites. Use{' '}
+            <code className="font-mono text-slate-700 dark:text-slate-200">/invite link</code> to generate your own
+            custom invite link (+1 invite count per new join) and{' '}
+            <code className="font-mono text-slate-700 dark:text-slate-200">-i</code> to check your invites.
+          </p>
+
+          {showInviteLinkBuilder && onCreateCustomInvite && (
+            <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-[#1D2029] p-3 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-900 dark:text-white">
+                  <Link2 className="h-3.5 w-3.5 text-[var(--accent)]" />
+                  <span>Custom Personal Invite Link — Select Expiry Period</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowInviteLinkBuilder(false)}
+                  className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {INVITE_EXPIRY_OPTIONS.map((opt) => {
+                  const selected = inviteExpiryMinutes === opt.minutes;
+                  return (
+                    <button
+                      key={opt.label}
+                      type="button"
+                      onClick={() => setInviteExpiryMinutes(opt.minutes)}
+                      className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
+                        selected
+                          ? 'border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-contrast)]'
+                          : 'border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#14171F] text-slate-700 dark:text-slate-300 hover:border-[var(--accent)]'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  disabled={creatingCustomInvite}
+                  onClick={handleGenerateCustomInvite}
+                  className="ml-auto rounded-lg bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
+                >
+                  {creatingCustomInvite ? 'Creating...' : 'Generate Custom Link'}
+                </button>
+              </div>
+              {latestCustomInvite && (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs">
+                  <div className="min-w-0">
+                    <span className="font-semibold text-emerald-700 dark:text-emerald-300">Your custom link: </span>
+                    <code className="font-mono text-slate-800 dark:text-slate-100 break-all">
+                      {`${window.location.origin}/?invite=${latestCustomInvite.code}`}
+                    </code>
+                    <span className="ml-2 text-[11px] text-slate-500 dark:text-slate-400">
+                      ({latestCustomInvite.expiresAt
+                        ? `Expires ${new Date(latestCustomInvite.expiresAt).toLocaleString()}`
+                        : 'Never expires'})
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard
+                        ?.writeText(`${window.location.origin}/?invite=${latestCustomInvite.code}`)
+                        .catch(() => {});
+                      setCopiedCustomLink(true);
+                      setTimeout(() => setCopiedCustomLink(false), 1800);
+                    }}
+                    className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-emerald-700 shrink-0"
+                  >
+                    {copiedCustomLink ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                    <span>{copiedCustomLink ? 'Copied' : 'Copy Link'}</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Search Active Banner */}
       {searchQuery.trim() && (
         <div className="flex items-center justify-between border-b border-slate-200 dark:border-white/[0.07] bg-slate-50 dark:bg-[#171A21] px-4 py-2 text-xs text-slate-600 dark:text-slate-300">
@@ -778,7 +1000,13 @@ export function ChatView({
 
         {visibleMessages.length === 0 ? (
           <div className="py-12 text-center text-sm text-slate-500 dark:text-slate-400">
-            No messages match your view yet. Start the conversation below or type <code className="font-mono">/help</code>.
+            {isBotCmdChannel ? (
+              <>
+                Run <code className="font-mono">-i</code> to check invites, <code className="font-mono">/invite link</code> to create your personal link, or <code className="font-mono">/help</code>.
+              </>
+            ) : (
+              'No messages match your view yet. Start the conversation below.'
+            )}
           </div>
         ) : (
           visibleMessages.map((msg, idx) => {
@@ -797,7 +1025,8 @@ export function ChatView({
             const topRole = server?.roles
               .filter((r) => authorMember?.roleIds.includes(r.id))
               .sort((a, b) => b.position - a.position)[0];
-            const canEdit = msg.authorId === currentUser.id;
+            // Messages can ONLY be edited by the original message poster (and never bot messages)
+            const canEdit = msg.authorId === currentUser.id && !author?.isBot;
             const canDelete =
               canEdit ||
               (server
@@ -1203,17 +1432,46 @@ export function ChatView({
 
       {/* Composer Area */}
       <div className="shrink-0 px-4 pb-4 pt-1 relative">
-        {/* Slash Command Autocomplete */}
+        {/* Guardrail when user tries to enter a bot command outside #bot-cmd */}
+        {isTypingBlockedCommand && server && botCmdChannel && (
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/35 bg-amber-500/10 px-3.5 py-2 text-xs text-amber-800 dark:text-amber-200">
+            <span className="flex items-center gap-2">
+              <Terminal className="h-3.5 w-3.5 shrink-0" />
+              <span>
+                Bot commands (<code className="font-mono">-i</code>, <code className="font-mono">/invite link</code>, etc.) can only be entered in{' '}
+                <strong className="font-mono">#{botCmdChannel.name}</strong>.
+              </span>
+            </span>
+            <button
+              type="button"
+              onClick={() => onSelectChannel(server.id, botCmdChannel.id)}
+              className="rounded-lg bg-[var(--accent)] px-2.5 py-1 text-xs font-semibold text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
+            >
+              Go to #{botCmdChannel.name}
+            </button>
+          </div>
+        )}
+
+        {/* Bot Command Autocomplete (Active only in #bot-cmd or DMs) */}
         {slashMatches.length > 0 && (
           <div className="mb-2 rounded-xl border border-slate-200 dark:border-white/12 bg-white dark:bg-[#232733] p-1.5 shadow-xl">
             <p className="px-2.5 py-1 text-xs font-semibold text-slate-500 dark:text-slate-400">
-              Slash Commands · Relay Utility
+              Bot Commands · #{channel?.name || 'bot-cmd'}
             </p>
             {slashMatches.map((item) => (
               <button
                 key={item.cmd}
                 type="button"
-                onClick={() => setDraft(`${item.cmd} `)}
+                onClick={() => {
+                  if (item.cmd === '/invite link' && isBotCmdChannel && onCreateCustomInvite) {
+                    setShowInviteLinkBuilder(true);
+                    setDraft('/invite link ');
+                  } else if (item.cmd === '-i') {
+                    setDraft('-i');
+                  } else {
+                    setDraft(`${item.cmd} `);
+                  }
+                }}
                 className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-sm hover:bg-slate-100 dark:hover:bg-white/6"
               >
                 <span className="font-mono font-semibold text-[var(--accent)]">{item.cmd}</span>
@@ -1438,7 +1696,13 @@ export function ChatView({
               type="text"
               value={draft}
               onChange={(e) => handleDraftChange(e.target.value)}
-              placeholder={`Message ${channel ? `#${channel.name}` : title} (try /poll, /roll, or markdown)`}
+              placeholder={
+                isBotCmdChannel && channel
+                  ? `Run a bot command in #${channel.name} (try -i, /invite link never, or /help)`
+                  : channel
+                  ? `Message #${channel.name}${botCmdChannel ? ` (use #${botCmdChannel.name} for bot commands)` : ''}`
+                  : `Message ${title}`
+              }
               className="min-w-0 flex-1 bg-transparent px-1.5 py-1.5 text-sm text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none"
             />
 

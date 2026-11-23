@@ -5,12 +5,16 @@ import type {
   DirectMessageThread,
   FriendInviteCode,
   FriendRelation,
+  InviteLink,
   Message,
   MessageAttachment,
   PollData,
   PresenceStatus,
   Server,
+  SupportTicket,
   Thread,
+  TicketCategory,
+  TicketStatus,
   User,
   UserSettings,
   VoiceClip,
@@ -99,11 +103,21 @@ export const api = {
     template: 'blank' | 'opensource' | 'study' | 'gaming' | 'creators' | 'friends';
     description?: string;
     iconColor?: string;
+    botCmdSetup: { channelName: string; enabledCommands: string[] };
   }) {
     return request<{ server: Server; snapshot: AppStateSnapshot }>('/api/servers', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+  createCustomServerInvite(serverId: string, expiresInMinutes: number | null) {
+    return request<{ server: Server; invite: InviteLink; message?: Message }>(
+      `/api/servers/${encodeURIComponent(serverId)}/custom-invite`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ expiresInMinutes }),
+      }
+    );
   },
   joinServer(code: string) {
     return request<{ server: Server; snapshot: AppStateSnapshot }>('/api/servers/join', {
@@ -275,6 +289,27 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ code }),
     });
+  },
+  createTicket(
+    serverId: string,
+    payload: { category: TicketCategory; subject: string; details: string; rewardTierId?: string }
+  ) {
+    return request<{ ticket: SupportTicket; initialMessage: Message }>(
+      `/api/servers/${encodeURIComponent(serverId)}/tickets`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+  updateTicket(ticketId: string, patch: { status?: TicketStatus; approveReward?: boolean }) {
+    return request<{ ticket: SupportTicket; systemMessage?: Message; server?: Server }>(
+      `/api/tickets/${encodeURIComponent(ticketId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      }
+    );
   },
   updateVoice(payload: {
     action: 'join' | 'leave' | 'update' | 'raise_hand' | 'set_stage_role';

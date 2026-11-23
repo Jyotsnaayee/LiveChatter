@@ -241,6 +241,20 @@ export function HomeView({
 
               {/* Friends List */}
               <div className="space-y-2">
+                {friends.filter((f) => f.status === 'accepted' && !users[f.userId]?.isBot).length === 0 && (
+                  <div className="rounded-xl border border-teal-500/25 bg-teal-50/60 dark:bg-teal-950/25 px-4 py-3 text-xs text-teal-900 dark:text-teal-200 flex flex-wrap items-center justify-between gap-2">
+                    <span>
+                      You haven’t added any friends yet — <strong>LiveChatter Help Bot</strong> is ready below if you need a hand getting started.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onOpenInviteFriends('send')}
+                      className="font-semibold text-teal-700 dark:text-teal-300 underline underline-offset-2"
+                    >
+                      Invite friends via WhatsApp, Gmail or Messages
+                    </button>
+                  </div>
+                )}
                 <h3 className="text-xs font-semibold text-slate-500 dark:text-slate-400">
                   {friendFilter === 'online'
                     ? 'Online Friends'
@@ -266,9 +280,16 @@ export function HomeView({
                           <div className="flex items-center gap-3 min-w-0">
                             <Avatar user={u} size="md" showPresence />
                             <div className="min-w-0">
-                              <p className="font-display text-sm font-semibold text-slate-950 dark:text-white truncate">
-                                {u.displayName}
-                              </p>
+                              <div className="flex items-center gap-2 min-w-0">
+                                <p className="font-display text-sm font-semibold text-slate-950 dark:text-white truncate">
+                                  {u.displayName}
+                                </p>
+                                {u.isBot && (
+                                  <span className="shrink-0 rounded bg-teal-500/15 px-1.5 py-0.5 font-mono text-[10px] font-bold text-teal-700 dark:text-teal-300">
+                                    HELP BOT
+                                  </span>
+                                )}
+                              </div>
                               <p className="truncate text-xs text-slate-500 dark:text-slate-400">
                                 @{u.username} ·{' '}
                                 {rel.status === 'pending_incoming'
@@ -292,15 +313,17 @@ export function HomeView({
                                 >
                                   <MessageSquare className="h-4 w-4" />
                                 </button>
-                                <button
-                                  type="button"
-                                  onClick={() => onManageFriend('block', u.id)}
-                                  title="Block user"
-                                  aria-label={`Block ${u.displayName}`}
-                                  className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 dark:bg-white/8 text-slate-500 hover:bg-rose-500/15 hover:text-rose-500 transition-colors"
-                                >
-                                  <ShieldBan className="h-4 w-4" />
-                                </button>
+                                {!u.isBot && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onManageFriend('block', u.id)}
+                                    title="Block user"
+                                    aria-label={`Block ${u.displayName}`}
+                                    className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 dark:bg-white/8 text-slate-500 hover:bg-rose-500/15 hover:text-rose-500 transition-colors"
+                                  >
+                                    <ShieldBan className="h-4 w-4" />
+                                  </button>
+                                )}
                               </>
                             )}
                             {rel.status === 'pending_incoming' && (

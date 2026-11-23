@@ -6,6 +6,7 @@ import {
   Calendar,
   Check,
   Copy,
+  Gift,
   Link2,
   Mail,
   MessageCircle,
@@ -15,6 +16,7 @@ import {
   Shield,
   ShieldCheck,
   Smartphone,
+  Ticket,
   Trash2,
   Webhook,
   X,
@@ -47,7 +49,7 @@ const ALL_PERMISSIONS: { key: PermissionKey; label: string; dangerous?: boolean 
   { key: 'ADMINISTRATOR', label: 'Administrator (Full Override)', dangerous: true },
 ];
 
-type TabId = 'overview' | 'roles' | 'automod' | 'audit' | 'events' | 'invites' | 'insights' | 'apps';
+type TabId = 'overview' | 'roles' | 'automod' | 'audit' | 'events' | 'invites' | 'tickets' | 'insights' | 'apps';
 
 interface ServerSettingsModalProps {
   server: Server;
@@ -106,6 +108,16 @@ export function ServerSettingsModal({
 
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
 
+  // Ticket Bot & Invite Rewards state
+  const [ticketWelcome, setTicketWelcome] = useState(
+    server.ticketBot?.welcomeMessage ||
+      'Need help, have a question, or want to claim an invite reward? Generate a personal ticket below.'
+  );
+  const [rewardTitle, setRewardTitle] = useState('');
+  const [rewardDesc, setRewardDesc] = useState('');
+  const [rewardReqInvites, setRewardReqInvites] = useState(3);
+  const [rewardRoleId, setRewardRoleId] = useState('');
+
   const runUpdate = async (patch: Record<string, unknown>, okText: string) => {
     setErrorMsg(null);
     setStatusMsg(null);
@@ -139,6 +151,7 @@ export function ServerSettingsModal({
     { id: 'audit', label: 'Audit Log', icon: <ScrollText className="h-4 w-4" /> },
     { id: 'events', label: 'Scheduled Events', icon: <Calendar className="h-4 w-4" /> },
     { id: 'invites', label: 'Invites', icon: <Link2 className="h-4 w-4" /> },
+    { id: 'tickets', label: 'Ticket Bot & Rewards', icon: <Ticket className="h-4 w-4" /> },
     { id: 'insights', label: 'Server Insights', icon: <BarChart2 className="h-4 w-4" /> },
     { id: 'apps', label: 'Bots & Webhooks', icon: <Bot className="h-4 w-4" /> },
   ];
@@ -957,6 +970,204 @@ export function ServerSettingsModal({
                       Create Webhook
                     </button>
                   </div>
+                </div>
+              </div>
+            )}
+
+            {/* TICKET BOT & INVITE REWARDS */}
+            {tab === 'tickets' && (
+              <div className="space-y-6 max-w-2xl">
+                <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#171A21] p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="font-display text-sm font-bold text-slate-950 dark:text-white">
+                        Ticket Bot Welcome Message
+                      </h3>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Automatically installed in every server for private member queries, support, and invite reward claims.
+                      </p>
+                    </div>
+                  </div>
+                  <textarea
+                    rows={2}
+                    value={ticketWelcome}
+                    onChange={(e) => setTicketWelcome(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#14171F] px-3 py-2 text-xs text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-[var(--accent)] resize-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      runUpdate(
+                        { updateTicketBot: { welcomeMessage: ticketWelcome } },
+                        'Ticket Bot welcome message saved.'
+                      )
+                    }
+                    className="rounded-lg bg-[var(--accent)] px-3.5 py-1.5 text-xs font-medium text-[var(--accent-contrast)]"
+                  >
+                    Save Welcome Message
+                  </button>
+                </div>
+
+                {/* Invite Rewards Toggle & Tiers */}
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between gap-4 rounded-xl border border-slate-200 dark:border-white/10 p-4">
+                    <div>
+                      <h3 className="flex items-center gap-2 font-display text-sm font-bold text-slate-950 dark:text-white">
+                        <Gift className="h-4 w-4 text-[var(--accent)]" />
+                        <span>Server Invite Rewards</span>
+                      </h3>
+                      <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                        Allow members to open a personal ticket to collect free community rewards when they invite friends to {server.name}.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        runUpdate(
+                          {
+                            updateTicketBot: {
+                              inviteRewardsEnabled: !server.ticketBot?.inviteRewardsEnabled,
+                            },
+                          },
+                          server.ticketBot?.inviteRewardsEnabled
+                            ? 'Invite rewards disabled.'
+                            : 'Invite rewards enabled.'
+                        )
+                      }
+                      className={`rounded-lg px-3.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap ${
+                        server.ticketBot?.inviteRewardsEnabled
+                          ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                          : 'border border-slate-300 dark:border-white/15 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-white/8'
+                      }`}
+                    >
+                      {server.ticketBot?.inviteRewardsEnabled ? 'Enabled' : 'Disabled'}
+                    </button>
+                  </div>
+
+                  {/* Existing Tiers */}
+                  <div className="divide-y divide-slate-200 dark:divide-white/[0.07] rounded-xl border border-slate-200 dark:border-white/10">
+                    {(server.ticketBot?.inviteRewards || []).length === 0 ? (
+                      <p className="p-4 text-xs text-slate-500 dark:text-slate-400">
+                        No invite reward tiers configured yet. Add one below so members can collect rewards via Ticket Bot.
+                      </p>
+                    ) : (
+                      (server.ticketBot?.inviteRewards || []).map((tier) => {
+                        const linkedRole = tier.roleId
+                          ? server.roles.find((r) => r.id === tier.roleId)
+                          : undefined;
+                        return (
+                          <div key={tier.id} className="flex items-center justify-between gap-4 px-4 py-3">
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-xs font-bold text-[var(--accent)]">
+                                  {tier.requiredInvites} invites
+                                </span>
+                                <p className="font-display text-sm font-semibold text-slate-950 dark:text-white truncate">
+                                  {tier.title}
+                                </p>
+                              </div>
+                              <p className="text-xs text-slate-500 dark:text-slate-400">
+                                {tier.description}
+                                {linkedRole ? ` · Auto-grants @${linkedRole.name} role on approval` : ''}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                runUpdate(
+                                  { deleteInviteRewardId: tier.id },
+                                  `Removed reward "${tier.title}".`
+                                )
+                              }
+                              aria-label={`Remove ${tier.title}`}
+                              className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-500/10 hover:text-rose-500 shrink-0"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  {/* Add Reward Tier Form */}
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (!rewardTitle.trim()) return;
+                      runUpdate(
+                        {
+                          addInviteReward: {
+                            title: rewardTitle.trim(),
+                            description:
+                              rewardDesc.trim() ||
+                              `Invite ${rewardReqInvites} friends to ${server.name} to claim this reward.`,
+                            requiredInvites: rewardReqInvites,
+                            roleId: rewardRoleId || undefined,
+                          },
+                        },
+                        `Added invite reward "${rewardTitle.trim()}".`
+                      );
+                      setRewardTitle('');
+                      setRewardDesc('');
+                      setRewardReqInvites(3);
+                      setRewardRoleId('');
+                    }}
+                    className="rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#171A21] p-4 space-y-3"
+                  >
+                    <p className="font-display text-xs font-bold text-slate-950 dark:text-white">
+                      Add Invite Reward Tier
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                      <input
+                        type="text"
+                        value={rewardTitle}
+                        onChange={(e) => setRewardTitle(e.target.value)}
+                        placeholder="Reward title (e.g. VIP Event Pass)"
+                        className="sm:col-span-2 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#14171F] px-3 py-2 text-xs text-slate-900 dark:text-white"
+                      />
+                      <input
+                        type="number"
+                        min={1}
+                        max={500}
+                        value={rewardReqInvites}
+                        onChange={(e) => setRewardReqInvites(Math.max(1, Number(e.target.value) || 1))}
+                        placeholder="Invites needed"
+                        className="rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#14171F] px-3 py-2 font-mono text-xs text-slate-900 dark:text-white"
+                      />
+                    </div>
+                    <input
+                      type="text"
+                      value={rewardDesc}
+                      onChange={(e) => setRewardDesc(e.target.value)}
+                      placeholder="Short description of what the member receives"
+                      className="w-full rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#14171F] px-3 py-2 text-xs text-slate-900 dark:text-white"
+                    />
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <select
+                        value={rewardRoleId}
+                        onChange={(e) => setRewardRoleId(e.target.value)}
+                        className="rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#14171F] px-3 py-1.5 text-xs text-slate-900 dark:text-white"
+                      >
+                        <option value="">No automatic role grant (manual reward)</option>
+                        {server.roles
+                          .filter((r) => r.name !== '@everyone')
+                          .map((r) => (
+                            <option key={r.id} value={r.id}>
+                              Auto-grant role: @{r.name}
+                            </option>
+                          ))}
+                      </select>
+                      <button
+                        type="submit"
+                        disabled={!rewardTitle.trim()}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-4 py-1.5 text-xs font-medium text-[var(--accent-contrast)] disabled:opacity-50"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        <span>Add Reward Tier</span>
+                      </button>
+                    </div>
+                  </form>
                 </div>
               </div>
             )}

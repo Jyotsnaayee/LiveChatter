@@ -124,6 +124,7 @@ export interface Channel {
   guidelines?: string;
   availableTags?: string[];
   followedAnnouncementChannelIds?: string[];
+  isBotCmdChannel?: boolean;
 }
 
 export interface AutoModRule {
@@ -168,6 +169,8 @@ export interface InviteLink {
   maxUses: number;
   expiresAt?: string;
   temporary: boolean;
+  isDefault?: boolean;
+  isCustom?: boolean;
 }
 
 export interface InstalledBot {
@@ -187,6 +190,40 @@ export interface WebhookConfig {
   channelId: string;
   createdAt: string;
   lastTriggeredAt?: string;
+}
+
+export interface InviteRewardTier {
+  id: string;
+  title: string;
+  description: string;
+  requiredInvites: number;
+  roleId?: string;
+}
+
+export interface TicketBotConfig {
+  enabled: boolean;
+  welcomeMessage: string;
+  inviteRewardsEnabled: boolean;
+  inviteRewards: InviteRewardTier[];
+}
+
+export type TicketCategory = 'query' | 'help' | 'invite_reward';
+export type TicketStatus = 'open' | 'resolved' | 'closed';
+
+export interface SupportTicket {
+  id: string;
+  ticketNumber: number;
+  serverId: string;
+  creatorId: string;
+  category: TicketCategory;
+  subject: string;
+  status: TicketStatus;
+  rewardTierId?: string;
+  rewardTitle?: string;
+  rewardFulfilled?: boolean;
+  createdAt: string;
+  updatedAt: string;
+  closedBy?: string;
 }
 
 export interface Server {
@@ -215,6 +252,13 @@ export interface Server {
   invites: InviteLink[];
   webhooks: WebhookConfig[];
   installedBotIds: string[];
+  botCmdChannelId?: string;
+  botCmdConfig?: {
+    channelName: string;
+    enabledCommands: string[];
+  };
+  ticketBot?: TicketBotConfig;
+  memberInviteCounts?: Record<string, number>;
 }
 
 export interface ServerFolder {
@@ -387,6 +431,7 @@ export interface AppStateSnapshot {
   dms: DirectMessageThread[];
   friends: FriendRelation[];
   friendInvites: FriendInviteCode[];
+  tickets: SupportTicket[];
   voiceParticipants: VoiceParticipant[];
   whiteboardStrokes: Record<string, WhiteboardStroke[]>;
   botDirectory: InstalledBot[];
@@ -403,6 +448,8 @@ export type WsServerEvent =
   | { type: 'message:deleted'; payload: { channelId: string; threadId?: string; messageId: string } }
   | { type: 'thread:created'; payload: { thread: Thread; initialMessage?: Message } }
   | { type: 'thread:updated'; payload: { thread: Thread } }
+  | { type: 'ticket:created'; payload: { ticket: SupportTicket; initialMessage?: Message } }
+  | { type: 'ticket:updated'; payload: { ticket: SupportTicket } }
   | { type: 'typing:update'; payload: { channelId: string; userId: string; isTyping: boolean } }
   | { type: 'presence:updated'; payload: { userId: string; status: PresenceStatus; customStatus?: User['customStatus'] } }
   | { type: 'voice:updated'; payload: { participants: VoiceParticipant[] } }

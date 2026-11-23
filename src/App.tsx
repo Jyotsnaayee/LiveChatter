@@ -21,6 +21,7 @@ import { DiscoveryView } from './components/DiscoveryView';
 import { ServerSettingsModal } from './components/ServerSettingsModal';
 import { UserSettingsModal } from './components/UserSettingsModal';
 import { InviteFriendsModal } from './components/InviteFriendsModal';
+import { TicketDeskView } from './components/TicketDeskView';
 import {
   CreateChannelModal,
   CreateGroupDmModal,
@@ -37,6 +38,7 @@ export default function App() {
   const [activeServerId, setActiveServerId] = useState<string | null>('srv-kernel');
   const [activeChannelId, setActiveChannelId] = useState<string | null>('ch-k-general');
   const [activeHomeTab, setActiveHomeTab] = useState<'friends' | 'requests' | 'dm'>('friends');
+  const [serverTicketsOpen, setServerTicketsOpen] = useState(false);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [showMemberList, setShowMemberList] = useState(true);
   const [selectedProfileUserId, setSelectedProfileUserId] = useState<string | null>(null);
@@ -175,6 +177,29 @@ export default function App() {
         return {
           ...prev,
           threads: prev.threads.map((t) => (t.id === event.payload.thread.id ? event.payload.thread : t)),
+        };
+      }
+
+      if (event.type === 'ticket:created') {
+        const { ticket, initialMessage } = event.payload;
+        const exists = (prev.tickets || []).some((t) => t.id === ticket.id);
+        const nextTickets = exists ? prev.tickets : [ticket, ...(prev.tickets || [])];
+        const existingMsgs = prev.messages[ticket.id] || [];
+        const nextMsgs =
+          initialMessage && !existingMsgs.some((m) => m.id === initialMessage.id)
+            ? [...existingMsgs, initialMessage]
+            : existingMsgs;
+        return {
+          ...prev,
+          tickets: nextTickets,
+          messages: { ...prev.messages, [ticket.id]: nextMsgs },
+        };
+      }
+
+      if (event.type === 'ticket:updated') {
+        return {
+          ...prev,
+          tickets: (prev.tickets || []).map((t) => (t.id === event.payload.ticket.id ? event.payload.ticket : t)),
         };
       }
 
@@ -416,6 +441,7 @@ export default function App() {
     const srv = state.servers.find((s) => s.id === serverId);
     setActiveView('server');
     setActiveServerId(serverId);
+    setServerTicketsOpen(false);
     setActiveThreadId(null);
     if (srv) {
       const firstCh = srv.channels.find((c) => c.type === 'text') || srv.channels[0];
@@ -429,10 +455,22 @@ export default function App() {
 
   const selectChannel = (channelId: string) => {
     setActiveChannelId(channelId);
+    setServerTicketsOpen(false);
     setActiveThreadId(null);
     clearUnread(channelId);
     setMobileDrawerOpen(false);
   };
+
+  const selectTicketDesk = () => {
+    setActiveView('server');
+    setServerTicketsOpen(true);
+    setActiveThreadId(null);
+    setMobileDrawerOpen(false);
+  };
+
+  const activeServerOpenTicketsCount = activeServer
+    ? (state.tickets || []).filter((t) => t.serverId === activeServer.id && t.status === 'open').length
+    : 0;
 
   const selectDm = (dmId: string) => {
     setActiveView('home');
@@ -493,7 +531,17 @@ export default function App() {
             mode={activeView === 'home' ? 'home' : 'server'}
             server={activeServer}
             dms={state.dms}
-            activeChannelId={activeView === 'home' ? (activeHomeTab === 'dm' ? activeChannelId : null) : activeChannel?.id || null}
+            activeChannelId={
+              activeView === 'home'
+                ? activeHomeTab === 'dm'
+                  ? activeChannelId
+                  : null
+                : serverTicketsOpen
+                ? null
+                : activeChannel?.id || null
+            }
+            activeTicketsView={activeView === 'server' && serverTicketsOpen}
+            openTicketsCount={activeServerOpenTicketsCount}
             activeHomeTab={activeHomeTab}
             currentUser={currentUser}
             users={state.users}
@@ -501,6 +549,7 @@ export default function App() {
             mutedChannelIds={state.mutedChannelIds}
             unreadChannelIds={state.unreadChannelIds}
             onSelectChannel={selectChannel}
+            onSelectTicketDesk={selectTicketDesk}
             onSelectHomeTab={(t) => {
               setActiveView('home');
               setActiveHomeTab(t);
@@ -590,7 +639,9 @@ export default function App() {
                 mode={activeView === 'home' ? 'home' : 'server'}
                 server={activeServer}
                 dms={state.dms}
-                activeChannelId={activeChannel?.id || activeChannelId}
+                activeChannelId={serverTicketsOpen ? null : activeChannel?.id || activeChannelId}
+                activeTicketsView={activeView === 'server' && serverTicketsOpen}
+                openTicketsCount={activeServerOpenTicketsCount}
                 activeHomeTab={activeHomeTab}
                 currentUser={currentUser}
                 users={state.users}
@@ -598,6 +649,7 @@ export default function App() {
                 mutedChannelIds={state.mutedChannelIds}
                 unreadChannelIds={state.unreadChannelIds}
                 onSelectChannel={selectChannel}
+                onSelectTicketDesk={selectTicketDesk}
                 onSelectHomeTab={(t) => {
                   setActiveView('home');
                   setActiveHomeTab(t);
@@ -691,6 +743,55 @@ export default function App() {
               onOpenInviteFriends={(tab = 'send') =>
                 setInviteModal({ open: true, tab })
               }
+            />
+          ) : activeView === 'server' && activeServer && serverTicketsOpen ? (
+            <TicketDeskView
+              server={activeServer}
+              currentUser={currentUser}
+              users={state.users}
+              tickets={state.tickets || []}
+              messages={state.messages}
+              onOpenMobileMenu={() => setMobileDrawerOpen(true)}
+              onOpenConfigureRewards={() => setServerSettingsTab('tickets')}
+              onOpenInviteFriends={() =>
+                setInviteModal({ open: true, tab: 'send', serverId: activeServer.id })
+              }
+              onCreateTicket={async (payload) => {
+                const { ticket, initialMessage } = await api.createTicket(activeServer.id, payload);
+                setState((prev) => {
+                  if (!prev) return prev;
+                  const exists = (prev.tickets || []).some((t) => t.id === ticket.id);
+                  return {
+                    ...prev,
+                    tickets: exists ? prev.tickets : [ticket, ...(prev.tickets || [])],
+                    messages: {
+                      ...prev.messages,
+                      [ticket.id]: (prev.messages[ticket.id] || []).some((m) => m.id === initialMessage.id)
+                        ? prev.messages[ticket.id]
+                        : [...(prev.messages[ticket.id] || []), initialMessage],
+                    },
+                  };
+                });
+                showToast(`Created personal ticket #TKT-${ticket.ticketNumber}.`);
+                return ticket;
+              }}
+              onSendTicketMessage={async (ticketId, content) => {
+                await api.sendMessage(ticketId, { content });
+              }}
+              onUpdateTicket={async (ticketId, patch) => {
+                const res = await api.updateTicket(ticketId, patch);
+                setState((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        tickets: (prev.tickets || []).map((t) => (t.id === res.ticket.id ? res.ticket : t)),
+                      }
+                    : prev
+                );
+                if (patch.approveReward) {
+                  showToast('Invite reward approved & logged.');
+                }
+              }}
             />
           ) : activeView === 'server' && activeServer && activeChannel?.type === 'forum' ? (
             <>
@@ -875,6 +976,27 @@ export default function App() {
                   });
                   showToast('Message forwarded.');
                 }}
+                onCreateCustomInvite={
+                  activeView === 'server' && activeServer
+                    ? async (expiresInMinutes) => {
+                        const res = await api.createCustomServerInvite(activeServer.id, expiresInMinutes);
+                        setState((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                servers: prev.servers.map((s) => (s.id === res.server.id ? res.server : s)),
+                              }
+                            : prev
+                        );
+                        showToast(
+                          res.invite.expiresAt
+                            ? `Created custom invite link ${res.invite.code}.`
+                            : `Created custom invite link ${res.invite.code} (Never expires).`
+                        );
+                        return { code: res.invite.code, expiresAt: res.invite.expiresAt };
+                      }
+                    : undefined
+                }
                 onTypingChange={(isTyping) => {
                   if (currentChannelId) socketRef.current?.sendTyping(currentChannelId, isTyping);
                 }}
@@ -996,8 +1118,10 @@ export default function App() {
             setState(snapshot);
             setActiveView('server');
             setActiveServerId(server.id);
-            setActiveChannelId(server.channels[0]?.id || null);
-            showToast(`Created server "${server.name}".`);
+            setActiveChannelId(server.botCmdChannelId || server.channels[0]?.id || null);
+            showToast(
+              `Created "${server.name}" with #${server.botCmdConfig?.channelName || 'bot-cmd'} ready.`
+            );
           }}
           onJoinInvite={async (code) => {
             const { server, snapshot } = await api.joinServer(code);
@@ -1091,7 +1215,10 @@ export default function App() {
             setAuthToken(token);
             setState(snapshot);
             socketRef.current?.authenticate(token);
-            showToast(`Welcome to LiveChatter, ${payload.displayName || payload.username}!`);
+            setActiveView('home');
+            setActiveHomeTab('friends');
+            setServerTicketsOpen(false);
+            showToast(`Welcome to LiveChatter, ${payload.displayName || payload.username}! LiveChatter Help Bot is ready in your Friends list.`);
           }}
           onLoginAccount={async (identifier, password) => {
             const { token, snapshot } = await api.login(identifier, password);

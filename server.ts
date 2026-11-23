@@ -134,6 +134,11 @@ app.post('/api/channels/:channelId/mute', requireAuth, (req: AuthedRequest, res)
 
 app.post('/api/servers', requireAuth, (req: AuthedRequest, res) => {
   try {
+    const botCmdSetup = req.body?.botCmdSetup;
+    if (!botCmdSetup || typeof botCmdSetup.channelName !== 'string' || !botCmdSetup.channelName.trim()) {
+      res.status(400).json({ error: 'Bot command setup (bot command channel name) is required when creating a server.' });
+      return;
+    }
     const server = store.createServer({
       ownerId: req.userId!,
       name: String(req.body?.name || ''),
@@ -141,11 +146,40 @@ app.post('/api/servers', requireAuth, (req: AuthedRequest, res) => {
       category: req.body?.category,
       description: req.body?.description,
       iconColor: req.body?.iconColor,
+      botCmdSetup: {
+        channelName: botCmdSetup.channelName,
+        enabledCommands: Array.isArray(botCmdSetup.enabledCommands)
+          ? botCmdSetup.enabledCommands.map(String)
+          : undefined,
+      },
     });
     broadcast({ type: 'server:created', payload: { server } }, (c) => c.userId === req.userId);
     res.json({ server, snapshot: store.getSnapshot(req.userId!) });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Could not create server' });
+  }
+});
+
+app.post('/api/servers/:serverId/custom-invite', requireAuth, (req: AuthedRequest, res) => {
+  try {
+    const rawMinutes = req.body?.expiresInMinutes;
+    const expiresInMinutes =
+      rawMinutes === null || rawMinutes === undefined || rawMinutes === 'never' || rawMinutes === 0
+        ? null
+        : Number(rawMinutes);
+    const { server, invite, message } = store.createCustomServerInvite(
+      req.userId!,
+      req.params.serverId,
+      Number.isFinite(expiresInMinutes) ? expiresInMinutes : null,
+      true
+    );
+    broadcast({ type: 'server:updated', payload: { server } });
+    if (message) {
+      broadcast({ type: 'message:created', payload: { message } });
+    }
+    res.json({ server, invite, message });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Could not create custom invite link' });
   }
 });
 
@@ -229,8 +263,27 @@ app.post('/api/channels/:channelId/messages', requireAuth, (req: AuthedRequest, 
       voiceClip: req.body?.voiceClip,
       forwardedFrom: req.body?.forwardedFrom,
     });
+    const ticket = store.getTicket(req.params.channelId);
     for (const msg of result.messages) {
-      broadcast({ type: 'message:created', payload: { message: msg } });
+      if (ticket) {
+        broadcast(
+          { type: 'message:created', payload: { message: msg } },
+          (c) => Boolean(c.userId && store.canAccessTicket(c.userId, ticket))
+        );
+      } else {
+        broadcast({ type: 'message:created', payload: { message: msg } });
+      }
+    }
+    if (result.createdTicket) {
+      const created = result.createdTicket;
+      const initialMessage = store.getSnapshot(created.creatorId).messages[created.id]?.[0];
+      broadcast(
+        { type: 'ticket:created', payload: { ticket: created, initialMessage } },
+        (c) => Boolean(c.userId && store.canAccessTicket(c.userId, created))
+      );
+    }
+    if (result.serverUpdated) {
+      broadcast({ type: 'server:updated', payload: { server: result.serverUpdated } });
     }
     res.json({ messages: result.messages });
   } catch (err) {
@@ -418,6 +471,49 @@ app.post('/api/friend-invites/redeem', requireAuth, (req: AuthedRequest, res) =>
     res.json({ ...result, snapshot: store.getSnapshot(req.userId!) });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Could not redeem invite code' });
+  }
+});
+
+app.post('/api/servers/:serverId/tickets', requireAuth, (req: AuthedRequest, res) => {
+  try {
+    const { ticket, initialMessage } = store.createTicket(req.userId!, req.params.serverId, {
+      category: req.body?.category || 'help',
+      subject: String(req.body?.subject || ''),
+      details: String(req.body?.details || ''),
+      rewardTierId: typeof req.body?.rewardTierId === 'string' ? req.body.rewardTierId : undefined,
+    });
+    broadcast(
+      { type: 'ticket:created', payload: { ticket, initialMessage } },
+      (c) => Boolean(c.userId && store.canAccessTicket(c.userId, ticket))
+    );
+    res.json({ ticket, initialMessage });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Could not create ticket' });
+  }
+});
+
+app.patch('/api/tickets/:ticketId', requireAuth, (req: AuthedRequest, res) => {
+  try {
+    const { ticket, systemMessage, serverUpdated } = store.updateTicket(req.userId!, req.params.ticketId, {
+      status: req.body?.status,
+      approveReward: Boolean(req.body?.approveReward),
+    });
+    broadcast(
+      { type: 'ticket:updated', payload: { ticket } },
+      (c) => Boolean(c.userId && store.canAccessTicket(c.userId, ticket))
+    );
+    if (systemMessage) {
+      broadcast(
+        { type: 'message:created', payload: { message: systemMessage } },
+        (c) => Boolean(c.userId && store.canAccessTicket(c.userId, ticket))
+      );
+    }
+    if (serverUpdated) {
+      broadcast({ type: 'server:updated', payload: { server: serverUpdated } });
+    }
+    res.json({ ticket, systemMessage, server: serverUpdated });
+  } catch (err) {
+    res.status(403).json({ error: err instanceof Error ? err.message : 'Could not update ticket' });
   }
 });
 

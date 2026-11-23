@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Hash, Megaphone, MessagesSquare, Radio, Search, Users, Volume2, X } from 'lucide-react';
+import { Check, Hash, Megaphone, MessagesSquare, Pin, Radio, Search, Terminal, Users, Volume2, X } from 'lucide-react';
 import type { ChannelType, DirectMessageThread, Server, User } from '../shared/types';
 import { Avatar } from './Avatar';
 
@@ -116,6 +116,16 @@ export function QuickSwitcherModal({
 }
 
 // --- Create or Join Server Modal ---
+const OPTIONAL_BOT_COMMANDS: { cmd: string; label: string }[] = [
+  { cmd: '/ticket', label: 'Personal support & reward tickets' },
+  { cmd: '/poll', label: 'Interactive community polls' },
+  { cmd: '/roll', label: 'Polyhedral dice roller' },
+  { cmd: '/coinflip', label: 'Fair coin flip' },
+  { cmd: '/remind', label: 'Formatted reminder cards' },
+  { cmd: '/serverinfo', label: 'Server summary stats' },
+  { cmd: '/help', label: 'List available commands' },
+];
+
 export function CreateServerModal({
   onCreateServer,
   onJoinInvite,
@@ -126,17 +136,31 @@ export function CreateServerModal({
     template: 'blank' | 'opensource' | 'study' | 'gaming' | 'creators' | 'friends';
     description?: string;
     iconColor?: string;
+    botCmdSetup: { channelName: string; enabledCommands: string[] };
   }) => Promise<void>;
   onJoinInvite: (code: string) => Promise<void>;
   onClose: () => void;
 }) {
   const [mode, setMode] = useState<'create' | 'join'>('create');
+  const [step, setStep] = useState<1 | 2>(1);
   const [name, setName] = useState('');
   const [template, setTemplate] = useState<'blank' | 'opensource' | 'study' | 'gaming' | 'creators' | 'friends'>('opensource');
   const [iconColor, setIconColor] = useState('#2563EB');
+  const [botCmdChannelName, setBotCmdChannelName] = useState('bot-cmd');
+  const [enabledOptionalCmds, setEnabledOptionalCmds] = useState<string[]>(
+    OPTIONAL_BOT_COMMANDS.map((c) => c.cmd)
+  );
   const [inviteCode, setInviteCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const sanitizedBotCmdName =
+    botCmdChannelName
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9-_]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 40) || 'bot-cmd';
 
   const templates: { id: typeof template; title: string; desc: string }[] = [
     { id: 'opensource', title: 'Open Source', desc: 'Announcements, RFC forum, Dev Sync voice & Town Hall stage' },
@@ -147,14 +171,41 @@ export function CreateServerModal({
     { id: 'blank', title: 'Start Blank', desc: 'Clean slate with #general and Lounge' },
   ];
 
+  const toggleOptionalCmd = (cmd: string) => {
+    setEnabledOptionalCmds((prev) =>
+      prev.includes(cmd) ? prev.filter((c) => c !== cmd) : [...prev, cmd]
+    );
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    if (mode === 'create' && step === 1) {
+      if (!name.trim()) {
+        setError('Enter a server name to continue to Bot Command Setup.');
+        return;
+      }
+      setStep(2);
+      return;
+    }
+
     setBusy(true);
     try {
       if (mode === 'create') {
         if (!name.trim()) throw new Error('Enter a server name.');
-        await onCreateServer({ name: name.trim(), template, iconColor });
+        if (!botCmdChannelName.trim()) {
+          throw new Error('Configure a Bot Command channel name before creating your server.');
+        }
+        await onCreateServer({
+          name: name.trim(),
+          template,
+          iconColor,
+          botCmdSetup: {
+            channelName: sanitizedBotCmdName,
+            enabledCommands: ['-i', '/invite link', ...enabledOptionalCmds],
+          },
+        });
       } else {
         if (!inviteCode.trim()) throw new Error('Enter an invite code.');
         await onJoinInvite(inviteCode.trim());
@@ -171,12 +222,23 @@ export function CreateServerModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-lg rounded-2xl border border-slate-200 dark:border-white/12 bg-white dark:bg-[#1D2029] p-6 shadow-2xl space-y-5"
+        className="w-full max-w-lg rounded-2xl border border-slate-200 dark:border-white/12 bg-white dark:bg-[#1D2029] p-6 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto"
       >
         <div className="flex items-center justify-between">
-          <h2 className="font-display text-lg font-bold text-slate-950 dark:text-white">
-            {mode === 'create' ? 'Create a Server' : 'Join via Invite'}
-          </h2>
+          <div>
+            <h2 className="font-display text-lg font-bold text-slate-950 dark:text-white">
+              {mode === 'join'
+                ? 'Join via Invite'
+                : step === 1
+                ? 'Create a Server'
+                : 'Bot Command Setup (Required)'}
+            </h2>
+            {mode === 'create' && (
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Step {step} of 2 · {step === 1 ? 'Choose template & identity' : 'Configure your dedicated bot command tab'}
+              </p>
+            )}
+          </div>
           <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-700 dark:hover:text-white">
             <X className="h-5 w-5" />
           </button>
@@ -185,7 +247,10 @@ export function CreateServerModal({
         <div className="flex gap-1.5 rounded-lg bg-slate-100 dark:bg-[#14171F] p-1">
           <button
             type="button"
-            onClick={() => setMode('create')}
+            onClick={() => {
+              setMode('create');
+              setError(null);
+            }}
             className={`flex-1 rounded-md py-1.5 text-xs font-medium transition-colors ${
               mode === 'create'
                 ? 'bg-white dark:bg-[#232733] text-slate-950 dark:text-white shadow-sm'
@@ -196,7 +261,10 @@ export function CreateServerModal({
           </button>
           <button
             type="button"
-            onClick={() => setMode('join')}
+            onClick={() => {
+              setMode('join');
+              setError(null);
+            }}
             className={`flex-1 rounded-md py-1.5 text-xs font-medium transition-colors ${
               mode === 'join'
                 ? 'bg-white dark:bg-[#232733] text-slate-950 dark:text-white shadow-sm'
@@ -214,7 +282,7 @@ export function CreateServerModal({
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          {mode === 'create' ? (
+          {mode === 'create' && step === 1 ? (
             <>
               <div className="grid grid-cols-2 gap-2">
                 {templates.map((t) => (
@@ -252,6 +320,87 @@ export function CreateServerModal({
                 />
               </div>
             </>
+          ) : mode === 'create' && step === 2 ? (
+            <div className="space-y-4">
+              <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#14171F] p-3.5 space-y-2.5">
+                <div className="flex items-center gap-2 text-xs font-semibold text-slate-800 dark:text-slate-200">
+                  <Terminal className="h-4 w-4 text-[var(--accent)]" />
+                  <span>Bot Command Tab Name</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-sm text-slate-400">#</span>
+                  <input
+                    type="text"
+                    required
+                    value={botCmdChannelName}
+                    onChange={(e) => setBotCmdChannelName(e.target.value)}
+                    placeholder="bot-cmd"
+                    className="flex-1 rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-[#1D2029] px-3 py-1.5 font-mono text-sm text-slate-900 dark:text-white"
+                  />
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Created as <span className="font-mono font-semibold text-slate-700 dark:text-slate-200">#{sanitizedBotCmdName}</span>. Bot commands can only be entered inside this tab.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                  Core Invite Commands (Always Enabled)
+                </p>
+                <div className="grid grid-cols-1 gap-1.5">
+                  <div className="flex items-center justify-between rounded-lg border border-emerald-500/25 bg-emerald-500/8 px-3 py-2 text-xs">
+                    <div>
+                      <span className="font-mono font-semibold text-emerald-700 dark:text-emerald-300">-i</span>
+                      <span className="ml-2 text-slate-600 dark:text-slate-300">Check personal verified invite count</span>
+                    </div>
+                    <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  </div>
+                  <div className="flex items-center justify-between rounded-lg border border-emerald-500/25 bg-emerald-500/8 px-3 py-2 text-xs">
+                    <div>
+                      <span className="font-mono font-semibold text-emerald-700 dark:text-emerald-300">/invite link</span>
+                      <span className="ml-2 text-slate-600 dark:text-slate-300">Custom invite link with expiry &amp; Never option</span>
+                    </div>
+                    <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <p className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                  Additional Bot Commands
+                </p>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {OPTIONAL_BOT_COMMANDS.map((item) => {
+                    const active = enabledOptionalCmds.includes(item.cmd);
+                    return (
+                      <button
+                        key={item.cmd}
+                        type="button"
+                        onClick={() => toggleOptionalCmd(item.cmd)}
+                        className={`flex items-center justify-between rounded-lg border px-2.5 py-1.5 text-left text-xs transition-colors ${
+                          active
+                            ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-slate-900 dark:text-white'
+                            : 'border-slate-200 dark:border-white/10 text-slate-500 dark:text-slate-400'
+                        }`}
+                      >
+                        <span className="font-mono font-semibold">{item.cmd}</span>
+                        {active && <Check className="h-3.5 w-3.5 text-[var(--accent)] shrink-0" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="flex items-start gap-2 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#14171F] p-3 text-[11px] text-slate-600 dark:text-slate-300">
+                <Pin className="h-3.5 w-3.5 text-[var(--accent)] shrink-0 mt-0.5" />
+                <span>
+                  Your server’s <strong>default server link</strong> will be pinned at the top of{' '}
+                  <span className="font-mono">#{sanitizedBotCmdName}</span>. Joins through the default link will{' '}
+                  <strong>not</strong> increase invite counts — only joins through a member’s own custom{' '}
+                  <span className="font-mono">/invite link</span> count (+1).
+                </span>
+              </div>
+            </div>
           ) : (
             <div className="space-y-2">
               <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300">
@@ -262,27 +411,49 @@ export function CreateServerModal({
                 required
                 value={inviteCode}
                 onChange={(e) => setInviteCode(e.target.value)}
-                placeholder="Try: kernel-craft, atlas-study, or vanguard"
+                placeholder="Try: kernel-craft, atlas-study, or a custom /invite link"
                 className="w-full rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#14171F] px-3 py-2 font-mono text-sm text-slate-900 dark:text-white"
               />
             </div>
           )}
 
-          <div className="flex justify-end gap-2 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-lg px-4 py-2 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-white/8"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={busy}
-              className="rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-medium text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
-            >
-              {busy ? 'Working...' : mode === 'create' ? 'Create Server' : 'Join Server'}
-            </button>
+          <div className="flex justify-between gap-2 pt-2">
+            {mode === 'create' && step === 2 ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setStep(1);
+                  setError(null);
+                }}
+                className="rounded-lg px-4 py-2 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-white/8"
+              >
+                Back
+              </button>
+            ) : (
+              <span />
+            )}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-lg px-4 py-2 text-xs font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-white/8"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={busy}
+                className="rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-medium text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-50"
+              >
+                {busy
+                  ? 'Working...'
+                  : mode === 'join'
+                  ? 'Join Server'
+                  : step === 1
+                  ? 'Next: Bot Command Setup'
+                  : 'Finish & Create Server'}
+              </button>
+            </div>
           </div>
         </form>
       </div>
