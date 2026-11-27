@@ -13,6 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import type { Message, Server, Thread, User } from '../shared/types';
+import { NAMEPLATE_CLASS, ORBS_BADGE_META, PROFILE_EFFECT_CLASS } from '../shared/orbsCatalog';
 import { Avatar, PRESENCE_LABEL } from './Avatar';
 import { MarkdownRenderer } from './MarkdownRenderer';
 
@@ -250,12 +251,24 @@ export function MemberListAndThreads({
           {group.members.map((member) => {
             const u = users[member.userId];
             if (!u) return null;
+            const memberRankIds = server.memberRanks?.[member.userId] || [];
+            const topRank = (server.shopRanks || [])
+              .filter((rk) => memberRankIds.includes(rk.id))
+              .sort((a, b) => b.price - a.price)[0];
+            const isBooster = Boolean(server.boosters?.some((b) => b.userId === member.userId));
+            const nameplateStyle = u.equippedNameplate ? NAMEPLATE_CLASS[u.equippedNameplate] || '' : '';
+            const hasPlus = Boolean(u.plusPassExpiresAt && new Date(u.plusPassExpiresAt).getTime() > Date.now());
+            const activeBadges = (u.equippedBadges || [])
+              .map((key) => ORBS_BADGE_META[key])
+              .filter(Boolean);
             return (
               <button
                 key={member.userId}
                 type="button"
                 onClick={() => onSelectProfileUser(member.userId)}
-                className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left hover:bg-slate-200/70 dark:hover:bg-white/[0.06] transition-colors"
+                className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors ${
+                  nameplateStyle || 'hover:bg-slate-200/70 dark:hover:bg-white/[0.06]'
+                }`}
               >
                 <Avatar user={u} size="sm" showPresence />
                 <div className="min-w-0 flex-1">
@@ -266,12 +279,38 @@ export function MemberListAndThreads({
                     >
                       {member.nickname || u.displayName}
                     </span>
+                    {activeBadges.map((b) => (
+                      <span
+                        key={b.name}
+                        title={b.name}
+                        className="text-xs font-bold shrink-0"
+                        style={{ color: b.color }}
+                      >
+                        {b.glyph}
+                      </span>
+                    ))}
+                    {hasPlus && (
+                      <span title="LiveChatter Plus (Feature Ball Credit)" className="text-[11px] font-bold text-amber-400 shrink-0">
+                        ✦
+                      </span>
+                    )}
+                    {isBooster && (
+                      <span title="Server Booster" className="text-[11px] shrink-0">
+                        🚀
+                      </span>
+                    )}
                     {u.isBot && <span className="text-[11px] font-medium text-[var(--accent)]">App</span>}
                   </div>
-                  {(u.customStatus?.text || u.activity) && (
-                    <p className="truncate text-[11px] text-slate-500 dark:text-slate-400">
-                      {u.customStatus?.text || `${u.activity?.name}`}
+                  {topRank ? (
+                    <p className="truncate text-[11px] font-semibold" style={{ color: topRank.color }}>
+                      {topRank.badge || '⭐'} {topRank.name}
                     </p>
+                  ) : (
+                    (u.customStatus?.text || u.activity) && (
+                      <p className="truncate text-[11px] text-slate-500 dark:text-slate-400">
+                        {u.customStatus?.text || `${u.activity?.name}`}
+                      </p>
+                    )
                   )}
                 </div>
               </button>
@@ -313,6 +352,9 @@ export function MemberListAndThreads({
             className="w-full max-w-sm overflow-hidden rounded-2xl border border-slate-200 dark:border-white/12 bg-white dark:bg-[#1D2029] shadow-2xl"
           >
             <div className="relative h-20" style={{ backgroundColor: profileUser.bannerColor }}>
+              {profileUser.profileEffect && PROFILE_EFFECT_CLASS[profileUser.profileEffect] && (
+                <div className={`absolute inset-0 ${PROFILE_EFFECT_CLASS[profileUser.profileEffect]}`} />
+              )}
               <button
                 type="button"
                 onClick={() => onSelectProfileUser(null)}
@@ -342,9 +384,33 @@ export function MemberListAndThreads({
                 )}
               </div>
 
-              <h4 className="font-display text-lg font-bold text-slate-950 dark:text-white">
-                {profileUser.displayName}
-              </h4>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <h4 className="font-display text-lg font-bold text-slate-950 dark:text-white">
+                  {profileUser.displayName}
+                </h4>
+                {(profileUser.equippedBadges || [])
+                  .map((k) => ORBS_BADGE_META[k])
+                  .filter(Boolean)
+                  .map((b) => (
+                    <span
+                      key={b.name}
+                      title={b.name}
+                      className="text-sm font-bold"
+                      style={{ color: b.color }}
+                    >
+                      {b.glyph}
+                    </span>
+                  ))}
+                {profileUser.plusPassExpiresAt &&
+                  new Date(profileUser.plusPassExpiresAt).getTime() > Date.now() && (
+                    <span
+                      title="Active LiveChatter Plus Credit"
+                      className="text-xs font-semibold text-amber-500"
+                    >
+                      ✦ Plus
+                    </span>
+                  )}
+              </div>
               <p className="text-xs text-slate-500 dark:text-slate-400">
                 @{profileUser.username}
                 {profileUser.pronouns && ` · ${profileUser.pronouns}`}
@@ -359,6 +425,33 @@ export function MemberListAndThreads({
                 <div className="mt-3 rounded-lg border border-slate-200 dark:border-white/8 bg-slate-50 dark:bg-[#171A21] p-2.5 text-xs">
                   <p className="font-semibold text-slate-900 dark:text-white">{profileUser.activity.name}</p>
                   <p className="text-slate-500 dark:text-slate-400">{profileUser.activity.details}</p>
+                </div>
+              )}
+
+              {/* Purchased Cosmetic Server Ranks (No Permissions) */}
+              {profileUser && (server.memberRanks?.[profileUser.id] || []).length > 0 && (
+                <div className="mt-4 space-y-1.5">
+                  <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">
+                    Cosmetic Server Ranks (No Permissions)
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(server.shopRanks || [])
+                      .filter((rk) => (server.memberRanks?.[profileUser.id] || []).includes(rk.id))
+                      .map((rk) => (
+                        <span
+                          key={rk.id}
+                          className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-semibold"
+                          style={{
+                            backgroundColor: `${rk.color}22`,
+                            color: rk.color,
+                            border: `1px solid ${rk.color}55`,
+                          }}
+                        >
+                          <span>{rk.badge || '⭐'}</span>
+                          <span>{rk.name}</span>
+                        </span>
+                      ))}
+                  </div>
                 </div>
               )}
 

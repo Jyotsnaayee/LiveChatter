@@ -42,6 +42,7 @@ import type {
 import { Avatar } from './Avatar';
 import { ChannelIcon } from './ChannelSidebar';
 import { MarkdownRenderer } from './MarkdownRenderer';
+import { ORBS_BADGE_META } from '../shared/orbsCatalog';
 import { playSoundboardEffect, speakMessageTTS } from '../lib/audio';
 
 const QUICK_EMOJIS = ['👍', '🔥', '🚀', '✅', '👀', '❤️', '🎉', '💡', '🎧', '👏', '😄', '🛠️'];
@@ -1025,6 +1026,11 @@ export function ChatView({
             const topRole = server?.roles
               .filter((r) => authorMember?.roleIds.includes(r.id))
               .sort((a, b) => b.position - a.position)[0];
+            const ownedRankIds = server?.memberRanks?.[msg.authorId] || [];
+            const topCosmeticRank = server?.shopRanks
+              ?.filter((rk) => ownedRankIds.includes(rk.id))
+              .sort((a, b) => b.price - a.price)[0];
+            const isBooster = Boolean(server?.boosters?.some((b) => b.userId === msg.authorId));
             // Messages can ONLY be edited by the original message poster (and never bot messages)
             const canEdit = msg.authorId === currentUser.id && !author?.isBot;
             const canDelete =
@@ -1090,6 +1096,52 @@ export function ChatView({
                         >
                           {authorMember?.nickname || author?.displayName || 'Unknown'}
                         </button>
+                        {topCosmeticRank && (
+                          <span
+                            title="Cosmetic Server Rank (no permissions)"
+                            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold"
+                            style={{
+                              backgroundColor: `${topCosmeticRank.color}22`,
+                              color: topCosmeticRank.color,
+                              border: `1px solid ${topCosmeticRank.color}55`,
+                            }}
+                          >
+                            <span>{topCosmeticRank.badge || '⭐'}</span>
+                            <span>{topCosmeticRank.name}</span>
+                          </span>
+                        )}
+                        {author?.equippedBadges &&
+                          author.equippedBadges.map((key) => {
+                            const meta = ORBS_BADGE_META[key];
+                            if (!meta) return null;
+                            return (
+                              <span
+                                key={key}
+                                title={meta.name}
+                                className="text-xs font-bold"
+                                style={{ color: meta.color }}
+                              >
+                                {meta.glyph}
+                              </span>
+                            );
+                          })}
+                        {author?.plusPassExpiresAt &&
+                          new Date(author.plusPassExpiresAt).getTime() > Date.now() && (
+                            <span
+                              title="Active LiveChatter Plus Credit"
+                              className="text-[11px] font-semibold text-amber-500"
+                            >
+                              ✦ Plus
+                            </span>
+                          )}
+                        {isBooster && (
+                          <span
+                            title="Server Booster"
+                            className="rounded bg-fuchsia-500/15 px-1.5 py-0.5 text-[10px] font-bold text-fuchsia-600 dark:text-fuchsia-300"
+                          >
+                            🚀 Booster
+                          </span>
+                        )}
                         {author?.isBot && (
                           <span className="text-xs font-medium text-[var(--accent)]">App</span>
                         )}

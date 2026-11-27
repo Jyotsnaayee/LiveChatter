@@ -3,6 +3,7 @@ import {
   Calendar,
   ChevronDown,
   ChevronRight,
+  Crown,
   Hash,
   Headphones,
   HeadphoneOff,
@@ -18,6 +19,7 @@ import {
   Search,
   Settings,
   ShieldCheck,
+  Sparkles,
   Terminal,
   Ticket,
   UserPlus,
@@ -32,6 +34,7 @@ import type {
   User,
   VoiceParticipant,
 } from '../shared/types';
+import { OrbIcon } from './OrbIcon';
 import { Avatar, PRESENCE_COLOR, PRESENCE_LABEL } from './Avatar';
 
 interface ChannelSidebarProps {
@@ -49,6 +52,7 @@ interface ChannelSidebarProps {
   unreadChannelIds: string[];
   onSelectChannel: (channelId: string) => void;
   onSelectTicketDesk: () => void;
+  onOpenFeatureBalls: (opts?: { tab?: 'quests' | 'profile' | 'ranks'; serverId?: string }) => void;
   onSelectHomeTab: (tab: 'friends' | 'requests') => void;
   onSelectDm: (dmId: string) => void;
   onOpenCreateDm: () => void;
@@ -96,6 +100,7 @@ export function ChannelSidebar({
   unreadChannelIds,
   onSelectChannel,
   onSelectTicketDesk,
+  onOpenFeatureBalls,
   onSelectHomeTab,
   onSelectDm,
   onOpenCreateDm,
@@ -248,6 +253,19 @@ export function ChannelSidebar({
                     {openTicketsCount}
                   </span>
                 )}
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenFeatureBalls({ tab: 'ranks', serverId: server.id })}
+                className="flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-sm text-slate-600 dark:text-slate-300 hover:bg-slate-200/70 dark:hover:bg-white/[0.05] hover:text-slate-900 dark:hover:text-white transition-colors"
+              >
+                <span className="flex items-center gap-2 truncate">
+                  <Crown className="h-4 w-4 shrink-0 text-amber-500" />
+                  <span className="truncate">Ranks & Boosts</span>
+                </span>
+                <span className="font-mono text-[11px] font-semibold text-fuchsia-600 dark:text-fuchsia-400 tabular-nums">
+                  Lv.{server.boostLevel || 0} · {server.boostCount || 0}
+                </span>
               </button>
               <button
                 type="button"
@@ -582,8 +600,11 @@ export function ChannelSidebar({
             <Avatar user={currentUser} size="sm" showPresence />
             <div className="min-w-0">
               <p className="truncate text-xs font-semibold text-slate-900 dark:text-white">{currentUser.displayName}</p>
-              <p className="truncate text-[11px] text-slate-500 dark:text-slate-400">
-                {currentUser.customStatus?.text || PRESENCE_LABEL[currentUser.status]}
+              <p className="truncate text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1">
+                <OrbIcon className="h-3.5 w-3.5 shrink-0" />
+                <span className="font-mono font-semibold text-indigo-600 dark:text-indigo-300 tabular-nums">
+                  {currentUser.featureBalls || 0} FB
+                </span>
               </p>
             </div>
           </button>

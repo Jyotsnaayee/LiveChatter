@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { PresenceStatus, User } from '../shared/types';
+import { AVATAR_DECORATION_RING_CLASS } from '../shared/orbsCatalog';
 
 export const PRESENCE_LABEL: Record<PresenceStatus, string> = {
   online: 'Online',
@@ -17,16 +18,22 @@ export const PRESENCE_COLOR: Record<PresenceStatus, string> = {
   offline: 'bg-slate-400 dark:bg-slate-500',
 };
 
+const DECORATION_RING: Record<string, string> = AVATAR_DECORATION_RING_CLASS;
+
 export function Avatar({
   user,
   size = 'md',
   showPresence = false,
 }: {
-  user?: Pick<User, 'displayName' | 'avatarUrl' | 'avatarColor' | 'status'>;
+  user?: Pick<User, 'displayName' | 'avatarUrl' | 'avatarColor' | 'status' | 'avatarDecoration'>;
   size?: 'xs' | 'sm' | 'md' | 'lg' | 'xl';
   showPresence?: boolean;
 }) {
   const [imgFailed, setImgFailed] = useState(false);
+
+  useEffect(() => {
+    setImgFailed(false);
+  }, [user?.avatarUrl]);
 
   const sizeClass =
     size === 'xs'
@@ -54,6 +61,9 @@ export function Avatar({
     .toUpperCase();
 
   const status = user?.status || 'offline';
+  const decoRing = user?.avatarDecoration && user.avatarDecoration !== 'none'
+    ? DECORATION_RING[user.avatarDecoration] || ''
+    : '';
 
   return (
     <div className="relative inline-flex shrink-0">
@@ -63,12 +73,12 @@ export function Avatar({
           alt={user.displayName}
           referrerPolicy="no-referrer"
           onError={() => setImgFailed(true)}
-          className={`${sizeClass} rounded-full object-cover bg-slate-200 dark:bg-slate-800`}
+          className={`${sizeClass} rounded-full object-cover bg-slate-200 dark:bg-slate-800 ${decoRing}`}
         />
       ) : (
         <div
           style={{ backgroundColor: user?.avatarColor || '#475569' }}
-          className={`${sizeClass} flex items-center justify-center rounded-full font-display font-semibold text-white select-none`}
+          className={`${sizeClass} flex items-center justify-center rounded-full font-display font-semibold text-white select-none ${decoRing}`}
           aria-hidden="true"
         >
           {initials}

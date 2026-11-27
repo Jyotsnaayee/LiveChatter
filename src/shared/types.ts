@@ -66,14 +66,35 @@ export interface ActiveSession {
   current?: boolean;
 }
 
+export type AuthProvider = 'google' | 'github' | 'microsoft';
+
+export interface OrbTransaction {
+  id: string;
+  amount: number;
+  type: 'earn' | 'spend';
+  title: string;
+  category: 'quest' | 'shop' | 'profile' | 'rank' | 'boost' | 'pass';
+  createdAt: string;
+}
+
 export interface User {
   id: string;
   username: string;
   displayName: string;
   email?: string;
+  authProvider?: AuthProvider;
   avatarUrl?: string;
   avatarColor: string;
   bannerColor: string;
+  avatarDecoration?: string;
+  profileEffect?: string;
+  equippedNameplate?: string;
+  equippedBadges?: string[];
+  ownedDecorations?: string[];
+  ownedShopItemIds?: string[];
+  plusPassExpiresAt?: string;
+  orbHistory?: OrbTransaction[];
+  featureBalls?: number;
   bio: string;
   pronouns: string;
   status: PresenceStatus;
@@ -226,6 +247,22 @@ export interface SupportTicket {
   closedBy?: string;
 }
 
+export interface ServerRank {
+  id: string;
+  name: string;
+  color: string;
+  price: number;
+  badge?: string;
+  /** Cosmetic ranks strictly grant NO permissions */
+  permissions: [];
+}
+
+export interface ServerBooster {
+  userId: string;
+  count: number;
+  lastBoostedAt: string;
+}
+
 export interface Server {
   id: string;
   name: string;
@@ -259,6 +296,11 @@ export interface Server {
   };
   ticketBot?: TicketBotConfig;
   memberInviteCounts?: Record<string, number>;
+  shopRanks?: ServerRank[];
+  memberRanks?: Record<string, string[]>;
+  boostCount?: number;
+  boostLevel?: number;
+  boosters?: ServerBooster[];
 }
 
 export interface ServerFolder {
@@ -420,6 +462,37 @@ export interface FriendInviteCode {
   sharedChannels: ('whatsapp' | 'gmail' | 'messages' | 'copy' | 'native')[];
 }
 
+export type QuestFrequency = 'daily' | 'weekly' | 'monthly';
+
+export interface QuestItem {
+  id: string;
+  index: number;
+  frequency: QuestFrequency;
+  title: string;
+  description: string;
+  actionType: 'checkin' | 'message' | 'reaction' | 'command' | 'voice' | 'invite' | 'thread' | 'community';
+  target: number;
+  progress: number;
+  reward: number;
+  claimed: boolean;
+}
+
+export interface FeatureBallQuestsState {
+  balance: number;
+  dailyDateKey: string;
+  nextDailyResetAt: string;
+  weeklyCycle: number;
+  monthlyCycle: number;
+  dailyCompletedCount: number;
+  dailyTotalCount: number;
+  weeklyCompletedCount: number;
+  weeklyTotalCount: number;
+  monthlyCompletedCount: number;
+  monthlyTotalCount: number;
+  acceptedQuestIds: string[];
+  quests: QuestItem[];
+}
+
 export interface AppStateSnapshot {
   currentUserId: string;
   users: Record<string, User>;
@@ -439,6 +512,7 @@ export interface AppStateSnapshot {
   sessions: ActiveSession[];
   mutedChannelIds: string[];
   unreadChannelIds: string[];
+  featureBallQuests?: FeatureBallQuestsState;
 }
 
 export type WsServerEvent =

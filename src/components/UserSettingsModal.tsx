@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Accessibility,
+  Camera,
   Download,
   Headphones,
   Keyboard,
@@ -8,12 +9,16 @@ import {
   LogOut,
   Palette,
   Shield,
+  Sparkles,
+  Trash2,
   User as UserIcon,
   UserPlus,
   X,
 } from 'lucide-react';
 import type { ActiveSession, User, UserSettings } from '../shared/types';
+import { processImageUpload } from '../lib/imageUpload';
 import { Avatar } from './Avatar';
+import { CaptchaWidget } from './CaptchaWidget';
 
 const ACCENT_SWATCHES = [
   { name: 'Cobalt', hex: '#2563EB' },
@@ -28,36 +33,41 @@ type SettingsTab = 'account' | 'appearance' | 'voice' | 'privacy' | 'accessibili
 
 interface UserSettingsModalProps {
   currentUser: User;
-  allUsers: Record<string, User>;
   sessions: ActiveSession[];
   onClose: () => void;
+  onSignOut: () => void;
+  onOpenFeatureBallProfile: () => void;
   onUpdateProfile: (
-    patch: Partial<Pick<User, 'displayName' | 'bio' | 'pronouns' | 'bannerColor' | 'avatarColor'>> & {
+    patch: Partial<
+      Pick<User, 'displayName' | 'bio' | 'pronouns' | 'bannerColor' | 'avatarColor' | 'avatarDecoration' | 'profileEffect'>
+    > & {
+      avatarUrl?: string | null;
       settings?: Partial<UserSettings>;
     }
   ) => Promise<void>;
   onRevokeSession: (sessionId: string) => Promise<void>;
   onExportData: () => Promise<void>;
-  onSwitchDemoAccount: (userId: string) => Promise<void>;
   onRegisterAccount: (payload: {
     email: string;
     username: string;
     displayName: string;
     password: string;
     dateOfBirth: string;
+    captchaId: string;
+    captchaAnswer: string;
   }) => Promise<void>;
-  onLoginAccount: (identifier: string, password: string) => Promise<void>;
+  onLoginAccount: (identifier: string, password: string, captchaId: string, captchaAnswer: string) => Promise<void>;
 }
 
 export function UserSettingsModal({
   currentUser,
-  allUsers,
   sessions,
   onClose,
+  onSignOut,
+  onOpenFeatureBallProfile,
   onUpdateProfile,
   onRevokeSession,
   onExportData,
-  onSwitchDemoAccount,
   onRegisterAccount,
   onLoginAccount,
 }: UserSettingsModalProps) {
@@ -67,7 +77,7 @@ export function UserSettingsModal({
   const [bio, setBio] = useState(currentUser.bio);
   const [bannerColor, setBannerColor] = useState(currentUser.bannerColor);
 
-  // Auth forms
+  // Auth forms (CAPTCHA mandatory at final step)
   const [authMode, setAuthMode] = useState<'register' | 'login'>('register');
   const [regEmail, setRegEmail] = useState('');
   const [regUsername, setRegUsername] = useState('');
@@ -76,11 +86,49 @@ export function UserSettingsModal({
   const [regDob, setRegDob] = useState('2000-01-15');
   const [loginId, setLoginId] = useState('');
   const [loginPw, setLoginPw] = useState('');
+  const [captchaId, setCaptchaId] = useState('');
+  const [captchaAnswer, setCaptchaAnswer] = useState('');
+  const [captchaRefresh, setCaptchaRefresh] = useState(0);
 
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const avatarFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const settings = currentUser.settings;
+  const featureBalls = currentUser.featureBalls || 0;
+
+  const handleAvatarFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setError(null);
+    setNotice(null);
+    setUploadingAvatar(true);
+    try {
+      const dataUrl = await processImageUpload(file, 256);
+      await onUpdateProfile({ avatarUrl: dataUrl });
+      setNotice('Profile image updated! Free — 0 Feature Balls spent.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to update profile image.');
+    } finally {
+      setUploadingAvatar(false);
+    }
+  };
+
+  const handleRemoveAvatar = async () => {
+    setError(null);
+    setNotice(null);
+    setUploadingAvatar(true);
+    try {
+      await onUpdateProfile({ avatarUrl: null });
+      setNotice('Profile image removed! Free — 0 Feature Balls spent.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to remove profile image.');
+    } finally {
+      setUploadingAvatar(false);
+    }
+  };
 
   const updateSettings = async (partial: Partial<UserSettings>) => {
     setError(null);
@@ -123,6 +171,16 @@ export function UserSettingsModal({
               <span className="truncate">{item.label}</span>
             </button>
           ))}
+          <div className="pt-3 mt-3 border-t border-slate-200 dark:border-white/[0.08]">
+            <button
+              type="button"
+              onClick={onSignOut}
+              className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 transition-colors"
+            >
+              <LogOut className="h-4 w-4" />
+              <span>Sign Out</span>
+            </button>
+          </div>
         </nav>
 
         <div className="flex flex-1 flex-col min-w-0">
@@ -157,7 +215,7 @@ export function UserSettingsModal({
               <div className="space-y-6 max-w-xl">
                 <div className="overflow-hidden rounded-xl border border-slate-200 dark:border-white/10">
                   <div className="h-20" style={{ backgroundColor: bannerColor }} />
-                  <div className="flex items-end justify-between px-4 pb-4 -mt-8">
+                  <div className="flex flex-wrap items-end justify-between gap-3 px-4 pb-4 -mt-8">
                     <div className="flex items-end gap-3">
                       <div className="rounded-full ring-4 ring-white dark:ring-[#1D2029]">
                         <Avatar user={currentUser} size="xl" showPresence />
@@ -169,14 +227,71 @@ export function UserSettingsModal({
                         <p className="text-xs text-slate-500">@{currentUser.username}</p>
                       </div>
                     </div>
+                    <div className="flex items-center gap-2 pb-1">
+                      <button
+                        type="button"
+                        disabled={uploadingAvatar}
+                        onClick={() => avatarFileInputRef.current?.click()}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 transition-colors disabled:opacity-50"
+                      >
+                        <Camera className="h-3.5 w-3.5" />
+                        <span>{uploadingAvatar ? 'Uploading...' : 'Change Photo (Free)'}</span>
+                      </button>
+                      {currentUser.avatarUrl && (
+                        <button
+                          type="button"
+                          disabled={uploadingAvatar}
+                          onClick={handleRemoveAvatar}
+                          aria-label="Remove profile image"
+                          title="Remove profile image (Free)"
+                          className="inline-flex items-center justify-center rounded-lg border border-slate-200 dark:border-white/10 p-1.5 text-rose-500 hover:bg-rose-500/10 disabled:opacity-50"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                      <input
+                        ref={avatarFileInputRef}
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/gif"
+                        onChange={handleAvatarFileChange}
+                        className="hidden"
+                      />
+                    </div>
                   </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-xs">
+                  <span className="flex items-center gap-1.5 text-amber-800 dark:text-amber-200">
+                    <Sparkles className="h-4 w-4 text-amber-500 shrink-0" />
+                    <span>
+                      <strong>Profile photo is free (0 FB)</strong>. Name, bio &amp; banner edits cost{' '}
+                      <strong>10 Feature Balls</strong> (Balance:{' '}
+                      <strong className="font-mono">{featureBalls} FB</strong>).
+                    </span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onOpenFeatureBallProfile();
+                    }}
+                    className="font-semibold text-[var(--accent)] hover:underline"
+                  >
+                    Open Full Profile Studio →
+                  </button>
                 </div>
 
                 <form
                   onSubmit={async (e) => {
                     e.preventDefault();
-                    await onUpdateProfile({ displayName, pronouns, bio, bannerColor });
-                    setNotice('Profile saved.');
+                    setError(null);
+                    setNotice(null);
+                    try {
+                      await onUpdateProfile({ displayName, pronouns, bio, bannerColor });
+                      setNotice('Profile saved! Spent 10 Feature Balls.');
+                    } catch (err) {
+                      setError(err instanceof Error ? err.message : 'Unable to save profile.');
+                    }
                   }}
                   className="space-y-4"
                 >
@@ -226,9 +341,10 @@ export function UserSettingsModal({
                     </label>
                     <button
                       type="submit"
-                      className="rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-medium text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
+                      disabled={featureBalls < 10}
+                      className="rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-medium text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-45"
                     >
-                      Save Profile
+                      Save Profile (10 FB)
                     </button>
                   </div>
                 </form>
@@ -561,43 +677,34 @@ export function UserSettingsModal({
               </div>
             )}
 
-            {/* SWITCH / SIGN UP / LOGIN */}
+            {/* SWITCH / SIGN UP / LOGIN (Google Sign Out + Mandatory CAPTCHA) */}
             {tab === 'auth' && (
               <div className="space-y-6 max-w-xl">
-                <div className="space-y-2">
-                  <p className="text-sm font-semibold text-slate-900 dark:text-white">
-                    Quick Multi-User Switch (Test Real-Time Across Accounts)
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    {Object.values(allUsers)
-                      .filter((u) => !u.isBot)
-                      .slice(0, 5)
-                      .map((u) => (
-                        <button
-                          key={u.id}
-                          type="button"
-                          onClick={async () => {
-                            await onSwitchDemoAccount(u.id);
-                            setNotice(`Signed in as ${u.displayName}.`);
-                          }}
-                          className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium ${
-                            u.id === currentUser.id
-                              ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
-                              : 'border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-white/8'
-                          }`}
-                        >
-                          <Avatar user={u} size="xs" />
-                          <span>{u.displayName}</span>
-                        </button>
-                      ))}
+                <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#14171F] p-4 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900 dark:text-white">Switch Google Account</p>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Sign out to return to the Google Sign-In &amp; CAPTCHA gate and sign in with another Google account.
+                    </p>
                   </div>
+                  <button
+                    type="button"
+                    onClick={onSignOut}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-rose-500"
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
+                    <span>Sign Out &amp; Switch</span>
+                  </button>
                 </div>
 
                 <div className="border-t border-slate-200 dark:border-white/8 pt-5 space-y-4">
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => setAuthMode('register')}
+                      onClick={() => {
+                        setAuthMode('register');
+                        setCaptchaRefresh((n) => n + 1);
+                      }}
                       className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
                         authMode === 'register'
                           ? 'bg-[var(--accent)] text-[var(--accent-contrast)]'
@@ -608,7 +715,10 @@ export function UserSettingsModal({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setAuthMode('login')}
+                      onClick={() => {
+                        setAuthMode('login');
+                        setCaptchaRefresh((n) => n + 1);
+                      }}
                       className={`rounded-lg px-3 py-1.5 text-xs font-medium ${
                         authMode === 'login'
                           ? 'bg-[var(--accent)] text-[var(--accent-contrast)]'
@@ -631,10 +741,16 @@ export function UserSettingsModal({
                             displayName: regDisplay,
                             password: regPassword,
                             dateOfBirth: regDob,
+                            captchaId,
+                            captchaAnswer,
                           });
                           setNotice('Account created and signed in!');
+                          setCaptchaAnswer('');
+                          setCaptchaRefresh((n) => n + 1);
                         } catch (err) {
                           setError(err instanceof Error ? err.message : 'Registration failed.');
+                          setCaptchaAnswer('');
+                          setCaptchaRefresh((n) => n + 1);
                         }
                       }}
                       className="space-y-3"
@@ -687,11 +803,20 @@ export function UserSettingsModal({
                           className="w-full rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#14171F] px-3 py-2 font-mono text-sm text-slate-900 dark:text-white"
                         />
                       </div>
+                      <CaptchaWidget
+                        refreshTrigger={captchaRefresh}
+                        value={captchaAnswer}
+                        onChange={({ captchaId: cid, captchaAnswer: ans }) => {
+                          setCaptchaId(cid);
+                          setCaptchaAnswer(ans);
+                        }}
+                      />
                       <button
                         type="submit"
-                        className="rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-medium text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)]"
+                        disabled={captchaAnswer.trim().length < 6}
+                        className="rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-medium text-[var(--accent-contrast)] hover:bg-[var(--accent-hover)] disabled:opacity-45"
                       >
-                        Create Account
+                        Verify CAPTCHA &amp; Create Account
                       </button>
                     </form>
                   ) : (
@@ -700,10 +825,14 @@ export function UserSettingsModal({
                         e.preventDefault();
                         setError(null);
                         try {
-                          await onLoginAccount(loginId, loginPw);
+                          await onLoginAccount(loginId, loginPw, captchaId, captchaAnswer);
                           setNotice('Signed in successfully.');
+                          setCaptchaAnswer('');
+                          setCaptchaRefresh((n) => n + 1);
                         } catch (err) {
                           setError(err instanceof Error ? err.message : 'Login failed.');
+                          setCaptchaAnswer('');
+                          setCaptchaRefresh((n) => n + 1);
                         }
                       }}
                       className="space-y-3"
@@ -724,11 +853,20 @@ export function UserSettingsModal({
                         placeholder="Password"
                         className="w-full rounded-lg border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#14171F] px-3 py-2 text-sm text-slate-900 dark:text-white"
                       />
+                      <CaptchaWidget
+                        refreshTrigger={captchaRefresh}
+                        value={captchaAnswer}
+                        onChange={({ captchaId: cid, captchaAnswer: ans }) => {
+                          setCaptchaId(cid);
+                          setCaptchaAnswer(ans);
+                        }}
+                      />
                       <button
                         type="submit"
-                        className="rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-medium text-[var(--accent-contrast)]"
+                        disabled={captchaAnswer.trim().length < 6}
+                        className="rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-medium text-[var(--accent-contrast)] disabled:opacity-45"
                       >
-                        Sign In
+                        Verify CAPTCHA &amp; Sign In
                       </button>
                     </form>
                   )}

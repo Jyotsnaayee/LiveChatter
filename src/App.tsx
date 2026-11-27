@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Compass, Home, MessageSquare, Settings } from 'lucide-react';
+import { Compass, Home, MessageSquare, Settings, Sparkles } from 'lucide-react';
 import type {
   AppStateSnapshot,
   Message,
@@ -22,6 +22,8 @@ import { ServerSettingsModal } from './components/ServerSettingsModal';
 import { UserSettingsModal } from './components/UserSettingsModal';
 import { InviteFriendsModal } from './components/InviteFriendsModal';
 import { TicketDeskView } from './components/TicketDeskView';
+import { AuthGateScreen } from './components/AuthGateScreen';
+import { FeatureBallView } from './components/FeatureBallView';
 import {
   CreateChannelModal,
   CreateGroupDmModal,
@@ -31,10 +33,16 @@ import {
 
 export default function App() {
   const [state, setState] = useState<AppStateSnapshot | null>(null);
-  const [bootError, setBootError] = useState<string | null>(null);
+  const [pendingUrlInvite, setPendingUrlInvite] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('invite');
+    return code && code.trim() ? code.trim() : null;
+  });
 
   // Navigation state
-  const [activeView, setActiveView] = useState<'home' | 'server' | 'discovery'>('server');
+  const [activeView, setActiveView] = useState<'home' | 'server' | 'discovery' | 'featureballs'>('server');
+  const [featureBallTab, setFeatureBallTab] = useState<'quests' | 'shop' | 'profile' | 'ranks' | 'activity'>('quests');
+  const [featureBallServerId, setFeatureBallServerId] = useState<string | null>(null);
   const [activeServerId, setActiveServerId] = useState<string | null>('srv-kernel');
   const [activeChannelId, setActiveChannelId] = useState<string | null>('ch-k-general');
   const [activeHomeTab, setActiveHomeTab] = useState<'friends' | 'requests' | 'dm'>('friends');
@@ -276,44 +284,66 @@ export default function App() {
     });
   }, []);
 
-  // Bootstrap initial session + WebSocket connection
+  // Cleanup WebSocket on unmount
   useEffect(() => {
-    let mounted = true;
-    const socket = new LiveChatterSocket(handleWsEvent);
-    socketRef.current = socket;
-
-    api
-      .demoLogin('user-alex')
-      .then(({ token, snapshot }) => {
-        if (!mounted) return;
-        setAuthToken(token);
-        setState(snapshot);
-        socket.connect();
-        // Auto-open Redeem modal if user arrived from a WhatsApp / Gmail / Messages ?invite= link
-        const params = new URLSearchParams(window.location.search);
-        const urlInvite = params.get('invite');
-        if (urlInvite && urlInvite.trim()) {
-          setInviteModal({
-            open: true,
-            tab: 'redeem',
-            redeemCode: urlInvite.trim(),
-          });
-          params.delete('invite');
-          const cleanSearch = params.toString();
-          const cleanUrl = `${window.location.pathname}${cleanSearch ? `?${cleanSearch}` : ''}${window.location.hash}`;
-          window.history.replaceState({}, '', cleanUrl);
-        }
-      })
-      .catch((err) => {
-        if (!mounted) return;
-        setBootError(err instanceof Error ? err.message : 'Unable to connect to LiveChatter server.');
-      });
-
     return () => {
-      mounted = false;
-      socket.disconnect();
+      socketRef.current?.disconnect();
     };
-  }, [handleWsEvent]);
+  }, []);
+
+  const handleAuthenticated = useCallback(
+    ({
+      token,
+      snapshot,
+      isNewUser,
+    }: {
+      token: string;
+      user: User;
+      snapshot: AppStateSnapshot;
+      isNewUser?: boolean;
+    }) => {
+      setAuthToken(token);
+      setState(snapshot);
+
+      socketRef.current?.disconnect();
+      const socket = new LiveChatterSocket(handleWsEvent);
+      socketRef.current = socket;
+      socket.connect();
+
+      if (isNewUser || snapshot.servers.length === 0) {
+        setActiveView('home');
+        setActiveHomeTab('friends');
+      } else {
+        const firstServer = snapshot.servers[0];
+        setActiveView('server');
+        setActiveServerId(firstServer.id);
+        setActiveChannelId(firstServer.channels[0]?.id || null);
+      }
+
+      if (pendingUrlInvite) {
+        setInviteModal({
+          open: true,
+          tab: 'redeem',
+          redeemCode: pendingUrlInvite,
+        });
+        setPendingUrlInvite(null);
+        const params = new URLSearchParams(window.location.search);
+        params.delete('invite');
+        const cleanSearch = params.toString();
+        const cleanUrl = `${window.location.pathname}${cleanSearch ? `?${cleanSearch}` : ''}${window.location.hash}`;
+        window.history.replaceState({}, '', cleanUrl);
+      }
+    },
+    [handleWsEvent, pendingUrlInvite]
+  );
+
+  const handleSignOut = useCallback(() => {
+    socketRef.current?.disconnect();
+    socketRef.current = null;
+    setAuthToken(null);
+    setUserSettingsOpen(false);
+    setState(null);
+  }, []);
 
   // Expire stale typing indicators
   useEffect(() => {
@@ -401,32 +431,13 @@ export default function App() {
     );
   };
 
-  if (bootError) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-[#111318] p-6 text-slate-200">
-        <div className="max-w-md rounded-2xl border border-white/10 bg-[#1D2029] p-6 space-y-3 text-center">
-          <h1 className="font-display text-lg font-bold text-white">Connection Error</h1>
-          <p className="text-sm text-slate-400">{bootError}</p>
-          <button
-            type="button"
-            onClick={() => window.location.reload()}
-            className="rounded-lg bg-[#2563EB] px-4 py-2 text-sm font-medium text-white"
-          >
-            Retry Connection
-          </button>
-        </div>
-      </div>
-    );
-  }
-
+  // Mandatory Google Sign-In + Final-Step CAPTCHA Gate
   if (!state || !currentUser) {
     return (
-      <div className="flex h-screen items-center justify-center bg-[#F3F4F6] dark:bg-[#111318]">
-        <div className="space-y-2 text-center">
-          <p className="font-display text-lg font-bold text-slate-900 dark:text-white">LiveChatter</p>
-          <p className="text-xs text-slate-500">Connecting to real-time gateway...</p>
-        </div>
-      </div>
+      <AuthGateScreen
+        pendingInviteCode={pendingUrlInvite}
+        onAuthenticated={handleAuthenticated}
+      />
     );
   }
 
@@ -494,6 +505,7 @@ export default function App() {
           activeServerId={activeServer?.id || null}
           unreadChannelIds={state.unreadChannelIds}
           pendingRequestCount={pendingReqCount}
+          featureBallBalance={currentUser.featureBalls || 0}
           onSelectHome={() => {
             setActiveView('home');
             setActiveHomeTab('friends');
@@ -503,6 +515,15 @@ export default function App() {
           onSelectDiscovery={() => {
             setActiveView('discovery');
             setActiveThreadId(null);
+          }}
+          onSelectFeatureBalls={() => {
+            setFeatureBallTab('quests');
+            setActiveView('featureballs');
+            setActiveThreadId(null);
+            api
+              .getQuests()
+              .then((q) => setState((prev) => (prev ? { ...prev, featureBallQuests: q } : prev)))
+              .catch(() => {});
           }}
           onOpenCreateServer={() => setCreateServerOpen(true)}
           onToggleFolder={(fid) =>
@@ -526,7 +547,7 @@ export default function App() {
           }}
         />
 
-        {activeView !== 'discovery' && (
+        {activeView !== 'discovery' && activeView !== 'featureballs' && (
           <ChannelSidebar
             mode={activeView === 'home' ? 'home' : 'server'}
             server={activeServer}
@@ -550,6 +571,16 @@ export default function App() {
             unreadChannelIds={state.unreadChannelIds}
             onSelectChannel={selectChannel}
             onSelectTicketDesk={selectTicketDesk}
+            onOpenFeatureBalls={(opts) => {
+              setFeatureBallTab(opts?.tab || 'quests');
+              if (opts?.serverId) setFeatureBallServerId(opts.serverId);
+              setActiveView('featureballs');
+              setActiveThreadId(null);
+              api
+                .getQuests()
+                .then((q) => setState((prev) => (prev ? { ...prev, featureBallQuests: q } : prev)))
+                .catch(() => {});
+            }}
             onSelectHomeTab={(t) => {
               setActiveView('home');
               setActiveHomeTab(t);
@@ -612,6 +643,7 @@ export default function App() {
               activeServerId={activeServer?.id || null}
               unreadChannelIds={state.unreadChannelIds}
               pendingRequestCount={pendingReqCount}
+              featureBallBalance={currentUser.featureBalls || 0}
               onSelectHome={() => {
                 setActiveView('home');
                 setActiveHomeTab('friends');
@@ -619,6 +651,11 @@ export default function App() {
               onSelectServer={selectServer}
               onSelectDiscovery={() => {
                 setActiveView('discovery');
+                setMobileDrawerOpen(false);
+              }}
+              onSelectFeatureBalls={() => {
+                setFeatureBallTab('quests');
+                setActiveView('featureballs');
                 setMobileDrawerOpen(false);
               }}
               onOpenCreateServer={() => {
@@ -634,7 +671,7 @@ export default function App() {
               }
               onReorderServers={() => {}}
             />
-            {activeView !== 'discovery' && (
+            {activeView !== 'discovery' && activeView !== 'featureballs' && (
               <ChannelSidebar
                 mode={activeView === 'home' ? 'home' : 'server'}
                 server={activeServer}
@@ -650,6 +687,12 @@ export default function App() {
                 unreadChannelIds={state.unreadChannelIds}
                 onSelectChannel={selectChannel}
                 onSelectTicketDesk={selectTicketDesk}
+                onOpenFeatureBalls={(opts) => {
+                  setFeatureBallTab(opts?.tab || 'quests');
+                  if (opts?.serverId) setFeatureBallServerId(opts.serverId);
+                  setActiveView('featureballs');
+                  setMobileDrawerOpen(false);
+                }}
                 onSelectHomeTab={(t) => {
                   setActiveView('home');
                   setActiveHomeTab(t);
@@ -705,7 +748,153 @@ export default function App() {
       {/* Main Content Workspace + Right Pane */}
       <div className="flex flex-1 min-w-0 flex-col h-full">
         <div className="flex flex-1 min-h-0 min-w-0 overflow-hidden">
-          {activeView === 'discovery' ? (
+          {activeView === 'featureballs' && state.featureBallQuests ? (
+            <FeatureBallView
+              currentUser={currentUser}
+              users={state.users}
+              servers={state.servers}
+              questsState={state.featureBallQuests}
+              initialTab={featureBallTab}
+              initialServerId={featureBallServerId || activeServer?.id || null}
+              onOpenMobileMenu={() => setMobileDrawerOpen(true)}
+              onRefreshQuests={async () => {
+                const q = await api.getQuests();
+                setState((prev) => (prev ? { ...prev, featureBallQuests: q } : prev));
+              }}
+              onAcceptQuest={async (questId) => {
+                const res = await api.acceptQuest(questId);
+                setState((prev) => (prev ? { ...prev, featureBallQuests: res.quests } : prev));
+                showToast('Quest accepted!');
+              }}
+              onCompleteQuest={async (questId) => {
+                const res = await api.completeQuest(questId);
+                setState((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        users: { ...prev.users, [res.user.id]: res.user },
+                        featureBallQuests: res.quests,
+                      }
+                    : prev
+                );
+                showToast(`+${res.awarded} Feature Balls earned!`);
+              }}
+              onClaimAllReady={async (frequency) => {
+                const res = await api.claimAllQuests(frequency);
+                setState((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        users: { ...prev.users, [res.user.id]: res.user },
+                        featureBallQuests: res.quests,
+                      }
+                    : prev
+                );
+                if (res.awarded > 0) showToast(`Claimed +${res.awarded} Feature Balls!`);
+              }}
+              onBuyOrbsShopItem={async (itemId) => {
+                const res = await api.buyOrbsShopItem(itemId);
+                setState((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        users: { ...prev.users, [res.user.id]: res.user },
+                        featureBallQuests: res.quests,
+                      }
+                    : prev
+                );
+                showToast(`Unlocked "${res.item.name}" with Feature Balls!`);
+              }}
+              onEquipOrbsShopItem={async (slot, itemId) => {
+                const res = await api.equipOrbsShopItem(slot, itemId);
+                setState((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        users: { ...prev.users, [res.user.id]: res.user },
+                      }
+                    : prev
+                );
+              }}
+              onSaveAvatar={async (avatarUrl) => {
+                const res = await api.updateMe({ avatarUrl });
+                setState((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        users: { ...prev.users, [res.user.id]: res.user },
+                        featureBallQuests: res.quests || prev.featureBallQuests,
+                      }
+                    : prev
+                );
+                showToast(avatarUrl ? 'Profile image updated (Free · 0 FB)!' : 'Profile image removed (Free · 0 FB).');
+              }}
+              onSaveProfile={async (patch) => {
+                const res = await api.updateMe(patch);
+                setState((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        users: { ...prev.users, [res.user.id]: res.user },
+                        featureBallQuests: res.quests || prev.featureBallQuests,
+                      }
+                    : prev
+                );
+                showToast('Profile customized! Spent 10 Feature Balls.');
+              }}
+              onBuyServerRank={async (serverId, rankId) => {
+                const res = await api.buyServerRank(serverId, rankId);
+                setState((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        users: { ...prev.users, [res.user.id]: res.user },
+                        servers: prev.servers.map((s) => (s.id === res.server.id ? res.server : s)),
+                        featureBallQuests: res.quests,
+                      }
+                    : prev
+                );
+                showToast(`Purchased cosmetic rank "${res.rank.name}"!`);
+              }}
+              onAddServerRank={async (serverId, payload) => {
+                const res = await api.addServerRank(serverId, payload);
+                setState((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        servers: prev.servers.map((s) => (s.id === res.server.id ? res.server : s)),
+                      }
+                    : prev
+                );
+                showToast(`Added cosmetic rank "${payload.name}".`);
+              }}
+              onDeleteServerRank={async (serverId, rankId) => {
+                const res = await api.deleteServerRank(serverId, rankId);
+                setState((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        servers: prev.servers.map((s) => (s.id === res.server.id ? res.server : s)),
+                      }
+                    : prev
+                );
+              }}
+              onBoostServer={async (serverId) => {
+                const res = await api.boostServer(serverId);
+                setState((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        users: { ...prev.users, [res.user.id]: res.user },
+                        servers: prev.servers.map((s) => (s.id === res.server.id ? res.server : s)),
+                        featureBallQuests: res.quests,
+                      }
+                    : prev
+                );
+                showToast(`Boosted ${res.server.name}! (-100 Feature Balls)`);
+              }}
+            />
+          ) : activeView === 'discovery' ? (
             <DiscoveryView
               discoveryServers={state.discoveryServers}
               joinedServers={state.servers}
@@ -1073,8 +1262,21 @@ export default function App() {
           </button>
           <button
             type="button"
+            onClick={() => {
+              setFeatureBallTab('quests');
+              setActiveView('featureballs');
+            }}
+            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium ${
+              activeView === 'featureballs' ? 'text-amber-500' : 'text-slate-500 dark:text-slate-400'
+            }`}
+          >
+            <Sparkles className="h-4 w-4" />
+            <span>Quests</span>
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveView('discovery')}
-            className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium ${
+            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium ${
               activeView === 'discovery' ? 'text-[var(--accent)]' : 'text-slate-500 dark:text-slate-400'
             }`}
           >
@@ -1084,7 +1286,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => setUserSettingsOpen(true)}
-            className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-500 dark:text-slate-400"
+            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-500 dark:text-slate-400"
           >
             <Settings className="h-4 w-4" />
             <span>Profile</span>
@@ -1181,11 +1383,24 @@ export default function App() {
       {userSettingsOpen && (
         <UserSettingsModal
           currentUser={currentUser}
-          allUsers={state.users}
           sessions={state.sessions}
           onClose={() => setUserSettingsOpen(false)}
+          onSignOut={handleSignOut}
+          onOpenFeatureBallProfile={() => {
+            setFeatureBallTab('profile');
+            setActiveView('featureballs');
+          }}
           onUpdateProfile={async (patch) => {
-            await api.updateMe(patch);
+            const res = await api.updateMe(patch);
+            setState((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    users: { ...prev.users, [res.user.id]: res.user },
+                    featureBallQuests: res.quests || prev.featureBallQuests,
+                  }
+                : prev
+            );
           }}
           onRevokeSession={async (sessionId) => {
             const { snapshot } = await api.revokeSession(sessionId);
@@ -1203,13 +1418,6 @@ export default function App() {
             URL.revokeObjectURL(url);
             showToast('Account data package downloaded.');
           }}
-          onSwitchDemoAccount={async (uid) => {
-            const { token, snapshot } = await api.demoLogin(uid);
-            setAuthToken(token);
-            setState(snapshot);
-            socketRef.current?.authenticate(token);
-            showToast(`Switched account to ${snapshot.users[uid]?.displayName}.`);
-          }}
           onRegisterAccount={async (payload) => {
             const { token, snapshot } = await api.register(payload);
             setAuthToken(token);
@@ -1220,8 +1428,8 @@ export default function App() {
             setServerTicketsOpen(false);
             showToast(`Welcome to LiveChatter, ${payload.displayName || payload.username}! LiveChatter Help Bot is ready in your Friends list.`);
           }}
-          onLoginAccount={async (identifier, password) => {
-            const { token, snapshot } = await api.login(identifier, password);
+          onLoginAccount={async (identifier, password, captchaId, captchaAnswer) => {
+            const { token, snapshot } = await api.login(identifier, password, captchaId, captchaAnswer);
             setAuthToken(token);
             setState(snapshot);
             socketRef.current?.authenticate(token);

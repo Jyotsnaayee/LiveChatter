@@ -1,8 +1,10 @@
 import type {
   AppStateSnapshot,
+  AuthProvider,
   Channel,
   ChannelType,
   DirectMessageThread,
+  FeatureBallQuestsState,
   FriendInviteCode,
   FriendRelation,
   InviteLink,
@@ -10,7 +12,9 @@ import type {
   MessageAttachment,
   PollData,
   PresenceStatus,
+  QuestFrequency,
   Server,
+  ServerRank,
   SupportTicket,
   Thread,
   TicketCategory,
@@ -50,22 +54,73 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  demoLogin(userId = 'user-alex') {
-    return request<{ token: string; user: User; snapshot: AppStateSnapshot }>('/api/auth/demo', {
-      method: 'POST',
-      body: JSON.stringify({ userId }),
-    });
+  getCaptcha() {
+    return request<{ captchaId: string; imageDataUrl: string; expiresAt: string }>('/api/auth/captcha');
   },
-  register(payload: { email: string; username: string; displayName: string; password: string; dateOfBirth: string }) {
+  getOAuthProviders() {
+    return request<{ providers: Record<AuthProvider, boolean> }>('/api/auth/oauth/providers');
+  },
+  getOAuthUrl(provider: AuthProvider) {
+    return request<{ url: string; redirectUri: string; state: string }>(
+      `/api/auth/oauth/${encodeURIComponent(provider)}/url`
+    );
+  },
+  getOAuthStatus(state: string) {
+    return request<{
+      status: 'pending' | 'ready' | 'error' | 'expired';
+      oauthTicket?: string;
+      profile?: { email?: string; displayName?: string; avatarUrl?: string };
+      error?: string;
+    }>(`/api/auth/oauth/status/${encodeURIComponent(state)}`);
+  },
+  completeOAuth(payload: {
+    oauthTicket: string;
+    captchaId: string;
+    captchaAnswer: string;
+    mode?: 'signin' | 'signup';
+  }) {
+    return request<{ token: string; user: User; isNewUser: boolean; snapshot: AppStateSnapshot }>(
+      '/api/auth/oauth/complete',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+  providerAuth(payload: {
+    provider: AuthProvider;
+    email: string;
+    displayName?: string;
+    mode?: 'signin' | 'signup';
+    captchaId: string;
+    captchaAnswer: string;
+  }) {
+    return request<{ token: string; user: User; isNewUser: boolean; snapshot: AppStateSnapshot }>(
+      '/api/auth/provider-auth',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    );
+  },
+  register(payload: {
+    email: string;
+    username: string;
+    displayName: string;
+    password: string;
+    dateOfBirth: string;
+    captchaId: string;
+    captchaAnswer: string;
+  }) {
     return request<{ token: string; user: User; snapshot: AppStateSnapshot }>('/api/auth/register', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
   },
-  login(identifier: string, password: string) {
+  login(identifier: string, password: string, captchaId: string, captchaAnswer: string) {
     return request<{ token: string; user: User; snapshot: AppStateSnapshot }>('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ identifier, password }),
+      body: JSON.stringify({ identifier, password, captchaId, captchaAnswer }),
     });
   },
   revokeSession(sessionId: string) {
@@ -78,14 +133,89 @@ export const api = {
     return request<AppStateSnapshot>('/api/bootstrap');
   },
   updateMe(
-    patch: Partial<Pick<User, 'displayName' | 'bio' | 'pronouns' | 'status' | 'customStatus' | 'bannerColor' | 'avatarColor'>> & {
+    patch: Partial<
+      Pick<
+        User,
+        | 'displayName'
+        | 'bio'
+        | 'pronouns'
+        | 'status'
+        | 'customStatus'
+        | 'bannerColor'
+        | 'avatarColor'
+        | 'avatarDecoration'
+        | 'profileEffect'
+      >
+    > & {
+      avatarUrl?: string | null;
       settings?: Partial<UserSettings>;
     }
   ) {
-    return request<{ user: User }>('/api/users/me', {
+    return request<{ user: User; chargedFeatureBalls?: number; quests?: FeatureBallQuestsState }>('/api/users/me', {
       method: 'PATCH',
       body: JSON.stringify(patch),
     });
+  },
+  getQuests() {
+    return request<FeatureBallQuestsState>('/api/quests');
+  },
+  acceptQuest(questId: string) {
+    return request<{ quests: FeatureBallQuestsState }>(`/api/quests/${encodeURIComponent(questId)}/accept`, {
+      method: 'POST',
+    });
+  },
+  completeQuest(questId: string) {
+    return request<{ user: User; quests: FeatureBallQuestsState; awarded: number }>(
+      `/api/quests/${encodeURIComponent(questId)}/complete`,
+      { method: 'POST' }
+    );
+  },
+  claimAllQuests(frequency?: QuestFrequency) {
+    return request<{ user: User; quests: FeatureBallQuestsState; claimedCount: number; awarded: number }>(
+      '/api/quests/claim-all',
+      {
+        method: 'POST',
+        body: JSON.stringify({ frequency }),
+      }
+    );
+  },
+  buyOrbsShopItem(itemId: string) {
+    return request<{ user: User; item: { id: string; name: string; price: number }; quests: FeatureBallQuestsState }>(
+      `/api/orbs/shop/${encodeURIComponent(itemId)}/buy`,
+      { method: 'POST' }
+    );
+  },
+  equipOrbsShopItem(slot: 'decoration' | 'effect' | 'nameplate' | 'badge', itemId: string | null) {
+    return request<{ user: User }>('/api/orbs/equip', {
+      method: 'POST',
+      body: JSON.stringify({ slot, itemId }),
+    });
+  },
+  addServerRank(serverId: string, payload: { name: string; color: string; price: number; badge?: string }) {
+    return request<{ server: Server }>(`/api/servers/${encodeURIComponent(serverId)}/ranks`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+  deleteServerRank(serverId: string, rankId: string) {
+    return request<{ server: Server }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ranks/${encodeURIComponent(rankId)}`,
+      { method: 'DELETE' }
+    );
+  },
+  buyServerRank(serverId: string, rankId: string) {
+    return request<{ user: User; server: Server; rank: ServerRank; quests: FeatureBallQuestsState }>(
+      `/api/servers/${encodeURIComponent(serverId)}/ranks/${encodeURIComponent(rankId)}/buy`,
+      { method: 'POST' }
+    );
+  },
+  boostServer(serverId: string) {
+    return request<{
+      user: User;
+      server: Server;
+      announcementMessage?: Message;
+      quests: FeatureBallQuestsState;
+    }>(`/api/servers/${encodeURIComponent(serverId)}/boost`, { method: 'POST' });
   },
   exportData() {
     return request<Record<string, unknown>>('/api/users/me/export');
@@ -103,7 +233,9 @@ export const api = {
     template: 'blank' | 'opensource' | 'study' | 'gaming' | 'creators' | 'friends';
     description?: string;
     iconColor?: string;
+    iconUrl: string;
     botCmdSetup: { channelName: string; enabledCommands: string[] };
+    ranks: Array<{ name: string; color: string; price: number; badge?: string }>;
   }) {
     return request<{ server: Server; snapshot: AppStateSnapshot }>('/api/servers', {
       method: 'POST',

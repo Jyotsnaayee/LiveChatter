@@ -4,10 +4,12 @@ import path from 'node:path';
 import type {
   ActiveSession,
   AppStateSnapshot,
+  AuthProvider,
   AutoModRule,
   Channel,
   ChannelType,
   DirectMessageThread,
+  FeatureBallQuestsState,
   FriendInviteCode,
   FriendRelation,
   InboxItem,
@@ -15,13 +17,16 @@ import type {
   InviteRewardTier,
   Message,
   MessageAttachment,
+  OrbTransaction,
   PermissionKey,
   PollData,
   PresenceStatus,
+  QuestItem,
   Role,
   ScheduledEvent,
   Server,
   ServerFolder,
+  ServerRank,
   SupportTicket,
   Thread,
   TicketBotConfig,
@@ -33,7 +38,18 @@ import type {
   VoiceParticipant,
   WhiteboardStroke,
 } from '../src/shared/types.ts';
+import { ORBS_SHOP_ITEM_BY_ID } from '../src/shared/orbsCatalog.ts';
 import { createInitialSeedData, DEFAULT_USER_SETTINGS } from './seed.ts';
+import {
+  ALL_QUEST_DEFS,
+  buildFeatureBallQuestsState,
+  createEmptyQuestRecord,
+  normalizeQuestRecord,
+  PROFILE_EDIT_COST,
+  QUEST_DEF_BY_ID,
+  SERVER_BOOST_COST,
+  type UserQuestRecord,
+} from './quests.ts';
 
 interface AuthRecord {
   userId: string;
@@ -70,6 +86,7 @@ export class LiveChatterStore {
   private mutedByUser: Record<string, string[]>;
   private unreadByUser: Record<string, string[]>;
   private authRecords: Record<string, AuthRecord> = {};
+  private questsByUser: Record<string, UserQuestRecord> = {};
   private tokens = new Map<string, SessionTokenRecord>();
   private dataFilePath: string;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -249,7 +266,40 @@ export class LiveChatterStore {
         };
       }
       this.ensurePinnedDefaultInviteMessage(server, botCmdChannel, defaultInvite.code);
+
+      // Ensure every server has cosmetic zero-permission ranks & boost tracking
+      if (!Array.isArray(server.shopRanks) || server.shopRanks.length === 0) {
+        server.shopRanks = [
+          { id: `rank-${server.id}-bronze`, name: 'Bronze Member', color: '#CD7F32', price: 20, badge: '🥉', permissions: [] },
+          { id: `rank-${server.id}-silver`, name: 'Silver Star', color: '#94A3B8', price: 50, badge: '🥈', permissions: [] },
+          { id: `rank-${server.id}-gold`, name: 'Gold Legend', color: '#F59E0B', price: 120, badge: '👑', permissions: [] },
+        ];
+      } else {
+        // Strictly enforce zero permissions on every cosmetic rank
+        server.shopRanks = server.shopRanks.map((r) => ({ ...r, permissions: [] }));
+      }
+      if (!server.memberRanks) server.memberRanks = {};
+      if (typeof server.boostCount !== 'number') server.boostCount = 0;
+      if (typeof server.boostLevel !== 'number') server.boostLevel = this.computeBoostLevel(server.boostCount);
+      if (!Array.isArray(server.boosters)) server.boosters = [];
     }
+
+    // Ensure every user has a numeric Feature Ball wallet
+    for (const u of Object.values(this.users)) {
+      if (typeof u.featureBalls !== 'number' || Number.isNaN(u.featureBalls)) {
+        u.featureBalls = 0;
+      }
+      if (!Array.isArray(u.ownedDecorations)) {
+        u.ownedDecorations = [];
+      }
+    }
+  }
+
+  private computeBoostLevel(boostCount: number): number {
+    if (boostCount >= 14) return 3;
+    if (boostCount >= 7) return 2;
+    if (boostCount >= 2) return 1;
+    return 0;
   }
 
   private ensurePinnedDefaultInviteMessage(server: Server, botCmdChannel: Channel, defaultCode: string) {
@@ -450,6 +500,7 @@ export class LiveChatterStore {
         this.inboxByUser = parsed.inboxByUser || this.inboxByUser;
         this.mutedByUser = parsed.mutedByUser || this.mutedByUser;
         this.authRecords = parsed.authRecords || {};
+        this.questsByUser = parsed.questsByUser || {};
       }
     } catch {
       // Fall back cleanly to initial seed data if persistence file is corrupted
@@ -479,6 +530,7 @@ export class LiveChatterStore {
               inboxByUser: this.inboxByUser,
               mutedByUser: this.mutedByUser,
               authRecords: this.authRecords,
+              questsByUser: this.questsByUser,
             },
             null,
             2
@@ -660,6 +712,121 @@ export class LiveChatterStore {
     return this.issueSession(record.userId, 'Web Browser');
   }
 
+  public authenticateWithProvider(input: {
+    provider: AuthProvider;
+    email: string;
+    displayName?: string;
+    username?: string;
+    avatarUrl?: string;
+    mode?: 'signin' | 'signup';
+  }): { token: string; user: User; isNewUser: boolean } {
+    const provider: AuthProvider =
+      input.provider === 'google' || input.provider === 'github' || input.provider === 'microsoft'
+        ? input.provider
+        : 'google';
+    const email = input.email.trim().toLowerCase();
+    if (!email || !email.includes('@')) {
+      throw new Error(`Please provide a valid ${provider} email address.`);
+    }
+
+    const existingUser = Object.values(this.users).find(
+      (u) => !u.isBot && u.email && u.email.toLowerCase() === email
+    );
+
+    if (existingUser) {
+      if (!existingUser.authProvider) existingUser.authProvider = provider;
+      if (input.avatarUrl && !existingUser.avatarUrl) existingUser.avatarUrl = input.avatarUrl;
+      if (typeof existingUser.featureBalls !== 'number') existingUser.featureBalls = 0;
+      this.scheduleSave();
+      const { token, user } = this.issueSession(existingUser.id, `${provider.toUpperCase()} Sign-In`);
+      return { token, user, isNewUser: false };
+    }
+
+    // Create a brand new user linked to Google / GitHub / Microsoft
+    const baseName = (input.username || email.split('@')[0] || 'member')
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]/g, '')
+      .slice(0, 20) || 'member';
+    let candidateUsername = baseName;
+    let suffix = 1;
+    while (Object.values(this.users).some((u) => u.username.toLowerCase() === candidateUsername)) {
+      candidateUsername = `${baseName}${suffix++}`;
+    }
+
+    const userId = `user-${crypto.randomBytes(5).toString('hex')}`;
+    const palette = ['#2563EB', '#059669', '#D97706', '#0D9488', '#E11D48', '#4F46E5'];
+    const color = palette[Math.floor(Math.random() * palette.length)];
+    const displayName = (input.displayName || baseName).trim().slice(0, 48) || candidateUsername;
+    const providerLabel = provider === 'google' ? 'Google' : provider === 'github' ? 'GitHub' : 'Microsoft';
+
+    const newUser: User = {
+      id: userId,
+      username: candidateUsername,
+      displayName,
+      email,
+      authProvider: provider,
+      avatarUrl: input.avatarUrl,
+      avatarColor: color,
+      bannerColor: '#1E293B',
+      ownedDecorations: [],
+      featureBalls: 0,
+      bio: `Signed in with ${providerLabel} on LiveChatter.`,
+      pronouns: '',
+      status: 'online',
+      connectedAccounts:
+        provider === 'github'
+          ? [{ id: `ca-${crypto.randomBytes(3).toString('hex')}`, platform: 'GitHub', handle: candidateUsername, verified: true }]
+          : [],
+      createdAt: new Date().toISOString(),
+      settings: { ...DEFAULT_USER_SETTINGS },
+    };
+
+    this.users[userId] = newUser;
+
+    const kernel = this.servers.find((s) => s.id === 'srv-kernel');
+    if (kernel && !kernel.members.some((m) => m.userId === userId)) {
+      kernel.members.push({
+        userId,
+        roleIds: ['role-k-everyone'],
+        joinedAt: new Date().toISOString(),
+        rulesAccepted: true,
+      });
+    }
+
+    // New users start with NO human friends — only the LiveChatter Help Bot
+    this.friendsByUser[userId] = [
+      { userId: 'bot-help', status: 'accepted', createdAt: new Date().toISOString() },
+    ];
+    this.inboxByUser[userId] = [];
+    this.mutedByUser[userId] = [];
+    this.unreadByUser[userId] = [];
+    this.questsByUser[userId] = createEmptyQuestRecord();
+
+    const helpDmId = `dm-help-${crypto.randomBytes(4).toString('hex')}`;
+    const nowIso = new Date().toISOString();
+    this.dms.unshift({
+      id: helpDmId,
+      isGroup: false,
+      participantIds: [userId, 'bot-help'],
+      lastMessageAt: nowIso,
+    });
+    this.messages[helpDmId] = [
+      {
+        id: `msg-${crypto.randomBytes(6).toString('hex')}`,
+        channelId: helpDmId,
+        authorId: 'bot-help',
+        content: `Welcome to **LiveChatter**, **${newUser.displayName}**! 👋\n\nYou signed in with **${providerLabel}** and passed human verification.\n\n**Quick ways to get started:**\n- **Feature Balls**: Open the **Feature Ball** hub on the left rail to complete **Daily (10)**, **Weekly (70)**, and **Monthly (310)** quests to earn Feature Balls for profile editing, server cosmetic ranks, and **Server Boosts (100 Feature Balls)**!\n- **Invite friends on their phone**: Click **Invite Friends** to send your code via **WhatsApp**, **Gmail**, or **Messages**.\n- **Ticket Bot & #bot-cmd**: Every server includes Ticket Bot and a dedicated \`#bot-cmd\` tab.`,
+        createdAt: nowIso,
+        reactions: [],
+        attachments: [],
+      },
+    ];
+
+    this.scheduleSave();
+    const { token, user } = this.issueSession(userId, `${providerLabel} Sign-In`);
+    return { token, user, isNewUser: true };
+  }
+
   public getSnapshot(userId: string): AppStateSnapshot {
     const userServers = this.servers.filter((s) => s.members.some((m) => m.userId === userId));
     const userDms = this.dms.filter((d) => d.participantIds.includes(userId));
@@ -682,6 +849,7 @@ export class LiveChatterStore {
       sessions: this.sessionsByUser[userId] || [],
       mutedChannelIds: this.mutedByUser[userId] || [],
       unreadChannelIds: this.unreadByUser[userId] || [],
+      featureBallQuests: this.getQuestsState(userId),
     };
   }
 
@@ -723,14 +891,85 @@ export class LiveChatterStore {
     if (server.auditLog.length > 100) server.auditLog.length = 100;
   }
 
+  private validateSafeImageUrl(value: unknown, label: string): string | undefined {
+    if (value === null || value === '') return undefined;
+    if (typeof value !== 'string') {
+      throw new Error(`${label} must be a valid image.`);
+    }
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    if (trimmed.length > 2_500_000) {
+      throw new Error(`${label} is too large. Please upload a smaller image.`);
+    }
+    const isSafeDataUrl = /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=\s]+$/i.test(trimmed);
+    const isSafeHttpsUrl = /^https:\/\/[^\s"'<>]+$/i.test(trimmed) && trimmed.length <= 2048;
+    if (!isSafeDataUrl && !isSafeHttpsUrl) {
+      throw new Error(`${label} must be a PNG, JPG, WebP, or GIF image.`);
+    }
+    return trimmed;
+  }
+
   public updateUserProfile(
     userId: string,
-    patch: Partial<Pick<User, 'displayName' | 'bio' | 'pronouns' | 'status' | 'customStatus' | 'bannerColor' | 'avatarColor'>> & {
+    patch: Partial<
+      Pick<
+        User,
+        | 'displayName'
+        | 'bio'
+        | 'pronouns'
+        | 'status'
+        | 'customStatus'
+        | 'bannerColor'
+        | 'avatarColor'
+        | 'avatarDecoration'
+        | 'profileEffect'
+      >
+    > & {
+      avatarUrl?: string | null;
       settings?: Partial<UserSettings>;
     }
-  ): User {
+  ): { user: User; chargedFeatureBalls: number } {
     const user = this.users[userId];
     if (!user) throw new Error('User not found');
+
+    // Profile image (avatarUrl) edits are always FREE (0 Feature Balls).
+    // Other profile customizations cost PROFILE_EDIT_COST Feature Balls.
+    const isPaidProfileEdit =
+      patch.displayName !== undefined ||
+      patch.bio !== undefined ||
+      patch.pronouns !== undefined ||
+      patch.bannerColor !== undefined ||
+      patch.avatarColor !== undefined ||
+      patch.avatarDecoration !== undefined ||
+      patch.profileEffect !== undefined;
+
+    let validatedAvatarUrl: string | undefined;
+    const hasAvatarChange = 'avatarUrl' in patch;
+    if (hasAvatarChange) {
+      validatedAvatarUrl = this.validateSafeImageUrl(patch.avatarUrl, 'Profile image');
+    }
+
+    let chargedFeatureBalls = 0;
+    if (isPaidProfileEdit) {
+      const balance = user.featureBalls || 0;
+      if (balance < PROFILE_EDIT_COST) {
+        throw new Error(
+          `Editing your profile details requires ${PROFILE_EDIT_COST} Feature Balls (you have ${balance}). Updating your profile image is free — complete Daily, Weekly, or Monthly quests to earn Feature Balls for other edits!`
+        );
+      }
+      user.featureBalls = balance - PROFILE_EDIT_COST;
+      chargedFeatureBalls = PROFILE_EDIT_COST;
+      this.recordOrbTransaction(user, {
+        amount: PROFILE_EDIT_COST,
+        type: 'spend',
+        title: 'Customized Discord-style profile details',
+        category: 'profile',
+      });
+    }
+
+    if (hasAvatarChange) {
+      user.avatarUrl = validatedAvatarUrl;
+    }
     if (typeof patch.displayName === 'string' && patch.displayName.trim()) {
       user.displayName = patch.displayName.trim().slice(0, 48);
     }
@@ -740,11 +979,13 @@ export class LiveChatterStore {
     if ('customStatus' in patch) user.customStatus = patch.customStatus;
     if (patch.bannerColor) user.bannerColor = patch.bannerColor;
     if (patch.avatarColor) user.avatarColor = patch.avatarColor;
+    if ('avatarDecoration' in patch) user.avatarDecoration = patch.avatarDecoration || undefined;
+    if ('profileEffect' in patch) user.profileEffect = patch.profileEffect || undefined;
     if (patch.settings) {
       user.settings = { ...user.settings, ...patch.settings };
     }
     this.scheduleSave();
-    return user;
+    return { user, chargedFeatureBalls };
   }
 
   public sendMessage(input: {
@@ -1329,8 +1570,11 @@ export class LiveChatterStore {
     category?: Server['category'];
     description?: string;
     iconColor?: string;
+    iconUrl?: string;
     botCmdSetup?: { channelName: string; enabledCommands?: string[] };
+    ranks?: { name: string; color: string; price: number; badge?: string }[];
   }): Server {
+    const validatedIconUrl = input.iconUrl ? this.validateSafeImageUrl(input.iconUrl, 'Server icon image') : undefined;
     const id = `srv-${crypto.randomBytes(4).toString('hex')}`;
     const cat1 = `cat-${crypto.randomBytes(3).toString('hex')}`;
     const cat2 = `cat-${crypto.randomBytes(3).toString('hex')}`;
@@ -1349,6 +1593,28 @@ export class LiveChatterStore {
           : ['/ticket', '/poll', '/roll', '/coinflip', '/remind', '/serverinfo', '/help']),
       ])
     );
+
+    // Strictly zero-permission cosmetic server ranks
+    const sanitizedRanks: ServerRank[] = (input.ranks || [])
+      .filter((r) => r && typeof r.name === 'string' && r.name.trim().length > 0)
+      .slice(0, 20)
+      .map((r) => ({
+        id: `rank-${crypto.randomBytes(4).toString('hex')}`,
+        name: r.name.trim().slice(0, 32),
+        color: /^#[0-9a-fA-F]{6}$/.test(r.color || '') ? r.color : '#2563EB',
+        price: Math.max(1, Math.min(100_000, Math.round(Number(r.price) || 20))),
+        badge: (r.badge || '⭐').slice(0, 4),
+        permissions: [],
+      }));
+
+    const finalRanks: ServerRank[] =
+      sanitizedRanks.length > 0
+        ? sanitizedRanks
+        : [
+            { id: `rank-${id}-bronze`, name: 'Bronze Member', color: '#CD7F32', price: 20, badge: '🥉', permissions: [] },
+            { id: `rank-${id}-silver`, name: 'Silver Star', color: '#94A3B8', price: 50, badge: '🥈', permissions: [] },
+            { id: `rank-${id}-gold`, name: 'Gold Legend', color: '#F59E0B', price: 120, badge: '👑', permissions: [] },
+          ];
 
     const templateChannels: Record<string, { name: string; type: ChannelType; topic: string; cat: string }[]> = {
       blank: [
@@ -1421,6 +1687,7 @@ export class LiveChatterStore {
       name: input.name.trim().slice(0, 60) || 'Untitled Server',
       description: input.description?.trim() || `Community space for ${input.name.trim()}.`,
       iconColor: input.iconColor || '#2563EB',
+      iconUrl: validatedIconUrl,
       category:
         input.category ||
         (input.template === 'study'
@@ -1538,6 +1805,11 @@ export class LiveChatterStore {
         channelName: cleanBotCmdName,
         enabledCommands,
       },
+      shopRanks: finalRanks,
+      memberRanks: {},
+      boostCount: 0,
+      boostLevel: 0,
+      boosters: [],
     };
 
     this.servers.push(server);
@@ -2490,5 +2762,440 @@ export class LiveChatterStore {
     if (customStatus !== undefined) user.customStatus = customStatus;
     this.scheduleSave();
     return user;
+  }
+
+  // --- Feature Ball Quests, Cosmetic Server Ranks & Server Boosts ---
+
+  private getOrInitQuestRecord(userId: string): UserQuestRecord {
+    if (!this.questsByUser[userId]) {
+      this.questsByUser[userId] = createEmptyQuestRecord();
+    }
+    const changed = normalizeQuestRecord(this.questsByUser[userId]);
+    if (changed) this.scheduleSave();
+    return this.questsByUser[userId];
+  }
+
+  public getQuestsState(userId: string): FeatureBallQuestsState {
+    const rec = this.getOrInitQuestRecord(userId);
+    const balance = this.users[userId]?.featureBalls || 0;
+    return buildFeatureBallQuestsState(rec, balance);
+  }
+
+  public recordQuestAction(userId: string, actionType: QuestItem['actionType'], amount = 1) {
+    const user = this.users[userId];
+    if (!user || user.isBot) return;
+    const rec = this.getOrInitQuestRecord(userId);
+    let updated = false;
+
+    for (const def of ALL_QUEST_DEFS) {
+      if (def.actionType !== actionType) continue;
+      const progressMap =
+        def.frequency === 'daily'
+          ? rec.dailyProgress
+          : def.frequency === 'weekly'
+          ? rec.weeklyProgress
+          : rec.monthlyProgress;
+      const claimedMap =
+        def.frequency === 'daily'
+          ? rec.dailyClaimed
+          : def.frequency === 'weekly'
+          ? rec.weeklyClaimed
+          : rec.monthlyClaimed;
+      if (claimedMap[def.id]) continue;
+      const prev = progressMap[def.id] || 0;
+      if (prev < def.target) {
+        progressMap[def.id] = Math.min(def.target, prev + amount);
+        updated = true;
+      }
+    }
+    if (updated) this.scheduleSave();
+  }
+
+  private recordOrbTransaction(user: User, entry: Omit<OrbTransaction, 'id' | 'createdAt'>) {
+    if (!user.orbHistory) user.orbHistory = [];
+    user.orbHistory.unshift({
+      id: `orbtx-${crypto.randomBytes(4).toString('hex')}`,
+      ...entry,
+      createdAt: new Date().toISOString(),
+    });
+    if (user.orbHistory.length > 60) {
+      user.orbHistory.length = 60;
+    }
+  }
+
+  public acceptQuest(userId: string, questId: string): FeatureBallQuestsState {
+    const user = this.users[userId];
+    if (!user) throw new Error('User not found.');
+    const def = QUEST_DEF_BY_ID.get(questId);
+    if (!def) throw new Error('Quest not found.');
+    const rec = this.getOrInitQuestRecord(userId);
+    if (!rec.acceptedQuestIds) rec.acceptedQuestIds = {};
+    rec.acceptedQuestIds[questId] = true;
+    this.scheduleSave();
+    return buildFeatureBallQuestsState(rec, user.featureBalls || 0);
+  }
+
+  public completeQuestTask(userId: string, questId: string): { user: User; quests: FeatureBallQuestsState; awarded: number } {
+    const user = this.users[userId];
+    if (!user) throw new Error('User not found.');
+    const def = QUEST_DEF_BY_ID.get(questId);
+    if (!def) throw new Error('Quest not found.');
+
+    const rec = this.getOrInitQuestRecord(userId);
+    const progressMap =
+      def.frequency === 'daily'
+        ? rec.dailyProgress
+        : def.frequency === 'weekly'
+        ? rec.weeklyProgress
+        : rec.monthlyProgress;
+    const claimedMap =
+      def.frequency === 'daily'
+        ? rec.dailyClaimed
+        : def.frequency === 'weekly'
+        ? rec.weeklyClaimed
+        : rec.monthlyClaimed;
+
+    if (claimedMap[def.id]) {
+      throw new Error('This quest reward has already been claimed.');
+    }
+
+    progressMap[def.id] = def.target;
+    claimedMap[def.id] = true;
+    if (rec.acceptedQuestIds) delete rec.acceptedQuestIds[def.id];
+    user.featureBalls = (user.featureBalls || 0) + def.reward;
+    this.recordOrbTransaction(user, {
+      amount: def.reward,
+      type: 'earn',
+      title: `Completed ${def.title}`,
+      category: 'quest',
+    });
+
+    // Check if completing this quest finished all 70 weekly or all 310 monthly quests
+    normalizeQuestRecord(rec);
+    this.scheduleSave();
+    return {
+      user,
+      quests: buildFeatureBallQuestsState(rec, user.featureBalls),
+      awarded: def.reward,
+    };
+  }
+
+  public claimAllReadyQuests(
+    userId: string,
+    frequency?: 'daily' | 'weekly' | 'monthly'
+  ): { user: User; quests: FeatureBallQuestsState; claimedCount: number; awarded: number } {
+    const user = this.users[userId];
+    if (!user) throw new Error('User not found.');
+    const rec = this.getOrInitQuestRecord(userId);
+
+    let claimedCount = 0;
+    let awarded = 0;
+    for (const def of ALL_QUEST_DEFS) {
+      if (frequency && def.frequency !== frequency) continue;
+      const progressMap =
+        def.frequency === 'daily'
+          ? rec.dailyProgress
+          : def.frequency === 'weekly'
+          ? rec.weeklyProgress
+          : rec.monthlyProgress;
+      const claimedMap =
+        def.frequency === 'daily'
+          ? rec.dailyClaimed
+          : def.frequency === 'weekly'
+          ? rec.weeklyClaimed
+          : rec.monthlyClaimed;
+
+      if (!claimedMap[def.id] && (progressMap[def.id] || 0) >= def.target) {
+        claimedMap[def.id] = true;
+        if (rec.acceptedQuestIds) delete rec.acceptedQuestIds[def.id];
+        awarded += def.reward;
+        claimedCount += 1;
+      }
+    }
+
+    if (awarded > 0) {
+      user.featureBalls = (user.featureBalls || 0) + awarded;
+      this.recordOrbTransaction(user, {
+        amount: awarded,
+        type: 'earn',
+        title: `Claimed ${claimedCount} ready ${frequency ? `${frequency} ` : ''}quest${claimedCount === 1 ? '' : 's'}`,
+        category: 'quest',
+      });
+      normalizeQuestRecord(rec);
+      this.scheduleSave();
+    }
+
+    return {
+      user,
+      quests: buildFeatureBallQuestsState(rec, user.featureBalls || 0),
+      claimedCount,
+      awarded,
+    };
+  }
+
+  public buyOrbsShopItem(
+    userId: string,
+    itemId: string
+  ): { user: User; item: NonNullable<ReturnType<typeof ORBS_SHOP_ITEM_BY_ID.get>>; quests: FeatureBallQuestsState } {
+    const user = this.users[userId];
+    if (!user) throw new Error('User not found.');
+    const item = ORBS_SHOP_ITEM_BY_ID.get(itemId);
+    if (!item) throw new Error('Shop item not found.');
+
+    if (!user.ownedShopItemIds) user.ownedShopItemIds = [];
+    if (!item.repeatable && user.ownedShopItemIds.includes(item.id)) {
+      throw new Error(`You already own "${item.name}". Equip it anytime for free!`);
+    }
+
+    const balance = user.featureBalls || 0;
+    if (balance < item.price) {
+      throw new Error(
+        `Not enough Feature Balls. "${item.name}" costs ${item.price} Feature Balls (you have ${balance}).`
+      );
+    }
+
+    user.featureBalls = balance - item.price;
+
+    if (item.repeatable && item.durationHours) {
+      const currentExpiry = user.plusPassExpiresAt ? new Date(user.plusPassExpiresAt).getTime() : 0;
+      const baseMs = Math.max(Date.now(), Number.isFinite(currentExpiry) ? currentExpiry : 0);
+      user.plusPassExpiresAt = new Date(baseMs + item.durationHours * 3600_000).toISOString();
+      this.recordOrbTransaction(user, {
+        amount: item.price,
+        type: 'spend',
+        title: `Redeemed ${item.name}`,
+        category: 'pass',
+      });
+    } else {
+      user.ownedShopItemIds = Array.from(new Set([...user.ownedShopItemIds, item.id]));
+      // Auto-equip newly unlocked cosmetic
+      if (item.category === 'decoration') {
+        user.avatarDecoration = item.cosmeticKey;
+      } else if (item.category === 'effect') {
+        user.profileEffect = item.cosmeticKey;
+      } else if (item.category === 'nameplate') {
+        user.equippedNameplate = item.cosmeticKey;
+      } else if (item.category === 'exclusive') {
+        user.equippedBadges = Array.from(new Set([...(user.equippedBadges || []), item.cosmeticKey]));
+      }
+      this.recordOrbTransaction(user, {
+        amount: item.price,
+        type: 'spend',
+        title: `Unlocked ${item.name}`,
+        category: 'shop',
+      });
+    }
+
+    this.scheduleSave();
+    return {
+      user,
+      item,
+      quests: this.getQuestsState(userId),
+    };
+  }
+
+  public equipOrbsShopItem(
+    userId: string,
+    slot: 'decoration' | 'effect' | 'nameplate' | 'badge',
+    itemId: string | null
+  ): User {
+    const user = this.users[userId];
+    if (!user) throw new Error('User not found.');
+    const owned = user.ownedShopItemIds || [];
+
+    if (!itemId) {
+      if (slot === 'decoration') user.avatarDecoration = undefined;
+      else if (slot === 'effect') user.profileEffect = undefined;
+      else if (slot === 'nameplate') user.equippedNameplate = undefined;
+      else if (slot === 'badge') user.equippedBadges = [];
+      this.scheduleSave();
+      return user;
+    }
+
+    const item = ORBS_SHOP_ITEM_BY_ID.get(itemId);
+    if (!item) throw new Error('Shop item not found.');
+    if (!owned.includes(item.id)) {
+      throw new Error(`Unlock "${item.name}" in the Feature Ball Shop first.`);
+    }
+
+    if (slot === 'decoration' && item.category === 'decoration') {
+      user.avatarDecoration = user.avatarDecoration === item.cosmeticKey ? undefined : item.cosmeticKey;
+    } else if (slot === 'effect' && item.category === 'effect') {
+      user.profileEffect = user.profileEffect === item.cosmeticKey ? undefined : item.cosmeticKey;
+    } else if (slot === 'nameplate' && item.category === 'nameplate') {
+      user.equippedNameplate = user.equippedNameplate === item.cosmeticKey ? undefined : item.cosmeticKey;
+    } else if (slot === 'badge' && item.category === 'exclusive' && !item.repeatable) {
+      const current = user.equippedBadges || [];
+      user.equippedBadges = current.includes(item.cosmeticKey)
+        ? current.filter((b) => b !== item.cosmeticKey)
+        : [...current, item.cosmeticKey];
+    } else {
+      throw new Error('Item does not match the selected cosmetic slot.');
+    }
+
+    this.scheduleSave();
+    return user;
+  }
+
+  public addServerRank(
+    userId: string,
+    serverId: string,
+    input: { name: string; color: string; price: number; badge?: string }
+  ): Server {
+    const server = this.getServer(serverId);
+    if (!server) throw new Error('Server not found.');
+    if (server.ownerId !== userId && !this.hasPermission(server, userId, 'MANAGE_SERVER')) {
+      throw new Error('Only the server owner or admins can add server ranks.');
+    }
+    const name = String(input.name || '').trim().slice(0, 32);
+    if (!name) throw new Error('Rank name is required.');
+    const price = Math.max(1, Math.min(100_000, Math.round(Number(input.price) || 20)));
+    const rank: ServerRank = {
+      id: `rank-${crypto.randomBytes(4).toString('hex')}`,
+      name,
+      color: /^#[0-9a-fA-F]{6}$/.test(input.color || '') ? input.color : '#2563EB',
+      price,
+      badge: (input.badge || '⭐').slice(0, 4),
+      permissions: [], // Cosmetic ranks strictly grant NO permissions
+    };
+    if (!server.shopRanks) server.shopRanks = [];
+    server.shopRanks.push(rank);
+    this.appendAudit(server, userId, 'Added Cosmetic Server Rank', `${rank.name} (${rank.price} Feature Balls, no permissions)`);
+    this.scheduleSave();
+    return server;
+  }
+
+  public deleteServerRank(userId: string, serverId: string, rankId: string): Server {
+    const server = this.getServer(serverId);
+    if (!server) throw new Error('Server not found.');
+    if (server.ownerId !== userId && !this.hasPermission(server, userId, 'MANAGE_SERVER')) {
+      throw new Error('Only the server owner or admins can remove server ranks.');
+    }
+    if ((server.shopRanks || []).length <= 1) {
+      throw new Error('A server must keep at least 1 cosmetic rank.');
+    }
+    server.shopRanks = (server.shopRanks || []).filter((r) => r.id !== rankId);
+    this.scheduleSave();
+    return server;
+  }
+
+  public buyServerRank(
+    userId: string,
+    serverId: string,
+    rankId: string
+  ): { user: User; server: Server; rank: ServerRank } {
+    const user = this.users[userId];
+    if (!user) throw new Error('User not found.');
+    const server = this.getServer(serverId);
+    if (!server) throw new Error('Server not found.');
+    if (!server.members.some((m) => m.userId === userId)) {
+      throw new Error('You must be a member of this server to buy a rank here.');
+    }
+
+    const rank = (server.shopRanks || []).find((r) => r.id === rankId);
+    if (!rank) throw new Error('Rank not found in this server.');
+
+    if (!server.memberRanks) server.memberRanks = {};
+    const owned = server.memberRanks[userId] || [];
+    if (owned.includes(rank.id)) {
+      throw new Error(`You already own the "${rank.name}" rank in ${server.name}.`);
+    }
+
+    const balance = user.featureBalls || 0;
+    if (balance < rank.price) {
+      throw new Error(
+        `Not enough Feature Balls. "${rank.name}" costs ${rank.price} Feature Balls (you have ${balance}).`
+      );
+    }
+
+    user.featureBalls = balance - rank.price;
+    server.memberRanks[userId] = [...owned, rank.id];
+    this.recordOrbTransaction(user, {
+      amount: rank.price,
+      type: 'spend',
+      title: `Bought rank "${rank.name}" in ${server.name}`,
+      category: 'rank',
+    });
+    // Strictly cosmetic: does NOT modify server.roles or grant any permissions
+    this.appendAudit(server, userId, 'Purchased Cosmetic Rank', `${rank.name} (${rank.price} Feature Balls)`);
+    this.scheduleSave();
+    return { user, server, rank };
+  }
+
+  public boostServer(
+    userId: string,
+    serverId: string
+  ): { user: User; server: Server; announcementMessage?: Message } {
+    const user = this.users[userId];
+    if (!user) throw new Error('User not found.');
+    const server = this.getServer(serverId);
+    if (!server) throw new Error('Server not found.');
+    if (!server.members.some((m) => m.userId === userId)) {
+      throw new Error('You must be a member of this server to boost it.');
+    }
+
+    const balance = user.featureBalls || 0;
+    if (balance < SERVER_BOOST_COST) {
+      throw new Error(
+        `Boosting a server costs ${SERVER_BOOST_COST} Feature Balls (you have ${balance}). Complete quests to earn more Feature Balls!`
+      );
+    }
+
+    user.featureBalls = balance - SERVER_BOOST_COST;
+    this.recordOrbTransaction(user, {
+      amount: SERVER_BOOST_COST,
+      type: 'spend',
+      title: `Boosted server ${server.name}`,
+      category: 'boost',
+    });
+    server.boostCount = (server.boostCount || 0) + 1;
+    server.boostLevel = this.computeBoostLevel(server.boostCount);
+    if (!server.boosters) server.boosters = [];
+    const existingBooster = server.boosters.find((b) => b.userId === userId);
+    const nowIso = new Date().toISOString();
+    if (existingBooster) {
+      existingBooster.count += 1;
+      existingBooster.lastBoostedAt = nowIso;
+    } else {
+      server.boosters.unshift({ userId, count: 1, lastBoostedAt: nowIso });
+    }
+
+    this.appendAudit(
+      server,
+      userId,
+      'Boosted Server',
+      `1 Boost (${SERVER_BOOST_COST} Feature Balls) — Total: ${server.boostCount} (Level ${server.boostLevel})`
+    );
+
+    // Post a celebratory Server Boost message in the primary text channel (like Discord)
+    let announcementMessage: Message | undefined;
+    const generalCh =
+      server.channels.find((c) => !c.isBotCmdChannel && (c.type === 'text' || c.type === 'announcement')) ||
+      server.channels[0];
+    if (generalCh) {
+      if (!this.messages[generalCh.id]) this.messages[generalCh.id] = [];
+      announcementMessage = {
+        id: `msg-${crypto.randomBytes(6).toString('hex')}`,
+        channelId: generalCh.id,
+        authorId: 'bot-relay',
+        content: '',
+        embed: {
+          title: `Server Boosted by ${user.displayName}!`,
+          description: `**${user.displayName}** just boosted **${server.name}** using **${SERVER_BOOST_COST} Feature Balls**!`,
+          fields: [
+            { name: 'Total Server Boosts', value: `${server.boostCount}` },
+            { name: 'Server Boost Level', value: `Level ${server.boostLevel}` },
+          ],
+          footer: 'Server Boost · 1 Boost = 100 Feature Balls',
+        },
+        createdAt: nowIso,
+        reactions: [{ emoji: '🚀', userIds: [userId] }],
+        attachments: [],
+      };
+      this.messages[generalCh.id].push(announcementMessage);
+    }
+
+    this.scheduleSave();
+    return { user, server, announcementMessage };
   }
 }

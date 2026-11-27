@@ -1,17 +1,20 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Compass, Folder, FolderOpen, MessageSquare, Plus } from 'lucide-react';
 import type { Server, ServerFolder } from '../shared/types';
+import { OrbIcon } from './OrbIcon';
 
 interface ServerRailProps {
   servers: Server[];
   folders: ServerFolder[];
-  activeView: 'home' | 'server' | 'discovery';
+  activeView: 'home' | 'server' | 'discovery' | 'featureballs';
   activeServerId: string | null;
   unreadChannelIds: string[];
   pendingRequestCount: number;
+  featureBallBalance: number;
   onSelectHome: () => void;
   onSelectServer: (serverId: string) => void;
   onSelectDiscovery: () => void;
+  onSelectFeatureBalls: () => void;
   onOpenCreateServer: () => void;
   onToggleFolder: (folderId: string) => void;
   onReorderServers: (orderedIds: string[]) => void;
@@ -35,6 +38,9 @@ function ServerIconButton({
   onDrop: (e: React.DragEvent) => void;
 }) {
   const [imgErr, setImgErr] = useState(false);
+  useEffect(() => {
+    setImgErr(false);
+  }, [server.iconUrl]);
   const initials = server.name
     .split(/\s+/)
     .map((w) => w[0])
@@ -88,9 +94,11 @@ export function ServerRail({
   activeServerId,
   unreadChannelIds,
   pendingRequestCount,
+  featureBallBalance,
   onSelectHome,
   onSelectServer,
   onSelectDiscovery,
+  onSelectFeatureBalls,
   onOpenCreateServer,
   onToggleFolder,
   onReorderServers,
@@ -228,6 +236,32 @@ export function ServerRail({
       >
         <Compass className="h-5 w-5" />
       </button>
+
+      {/* Feature Ball Hub (Orbs Quests, Shop, Profile Studio, Ranks & Boosts) */}
+      <div className="relative flex w-full items-center justify-center group">
+        <span
+          aria-hidden="true"
+          className={`absolute left-0 w-1 rounded-r-full bg-indigo-400 transition-all duration-150 ${
+            activeView === 'featureballs' ? 'h-9 opacity-100' : 'h-0 opacity-0 group-hover:h-5 group-hover:opacity-60'
+          }`}
+        />
+        <button
+          type="button"
+          onClick={onSelectFeatureBalls}
+          title={`Feature Balls & Orbs Shop (${featureBallBalance} FB)`}
+          aria-label={`Feature Balls and Orbs Shop (${featureBallBalance} Feature Balls)`}
+          className={`relative flex h-12 w-12 items-center justify-center transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 ${
+            activeView === 'featureballs'
+              ? 'rounded-2xl bg-indigo-600/25 ring-2 ring-indigo-400 shadow-lg shadow-indigo-500/20'
+              : 'rounded-[24px] bg-white dark:bg-[#1D2029] hover:rounded-2xl hover:bg-indigo-500/20'
+          }`}
+        >
+          <OrbIcon className="h-6 w-6" />
+          <span className="absolute -bottom-1 -right-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-indigo-600 px-1 font-mono text-[10px] font-bold text-white tabular-nums ring-2 ring-[#E8EAEF] dark:ring-[#111318]">
+            {featureBallBalance > 999 ? '999+' : featureBallBalance}
+          </span>
+        </button>
+      </div>
     </nav>
   );
 }
