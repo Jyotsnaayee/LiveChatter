@@ -77,6 +77,8 @@ jobs:
           ls -la "$PROJECT_DIR"
 
       - name: Build debug APK
+        env:
+          LIVECHAT_APP_URL: ${{ vars.LIVECHAT_APP_URL || secrets.LIVECHAT_APP_URL }}
         run: |
           cd "$PROJECT_DIR"
           gradle assembleDebug --stacktrace --console=plain

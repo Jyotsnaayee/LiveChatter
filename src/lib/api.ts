@@ -40,12 +40,13 @@ export function getAuthToken(): string | null {
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'X-Requested-With': 'LiveChatter',
     ...(init.headers as Record<string, string>),
   };
   if (authToken) {
     headers['Authorization'] = `Bearer ${authToken}`;
   }
-  const res = await fetch(path, { ...init, headers });
+  const res = await fetch(path, { credentials: 'include', ...init, headers });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(data.error || `Request failed (${res.status})`);
@@ -122,6 +123,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ identifier, password, captchaId, captchaAnswer }),
     });
+  },
+  restoreSession() {
+    return request<
+      | { authenticated: false }
+      | { authenticated: true; token: string; user: User; snapshot: AppStateSnapshot }
+    >('/api/auth/session');
+  },
+  logout() {
+    return request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' });
   },
   revokeSession(sessionId: string) {
     return request<{ snapshot: AppStateSnapshot }>('/api/auth/revoke-session', {

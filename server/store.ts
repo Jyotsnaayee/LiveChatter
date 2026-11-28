@@ -501,6 +501,22 @@ export class LiveChatterStore {
         this.mutedByUser = parsed.mutedByUser || this.mutedByUser;
         this.authRecords = parsed.authRecords || {};
         this.questsByUser = parsed.questsByUser || {};
+        if (parsed.sessionsByUser && typeof parsed.sessionsByUser === 'object') {
+          this.sessionsByUser = parsed.sessionsByUser;
+        }
+        if (Array.isArray(parsed.sessionTokens)) {
+          this.tokens.clear();
+          for (const rec of parsed.sessionTokens) {
+            if (rec && typeof rec.token === 'string' && typeof rec.userId === 'string' && typeof rec.sessionId === 'string') {
+              this.tokens.set(rec.token, {
+                token: rec.token,
+                userId: rec.userId,
+                sessionId: rec.sessionId,
+                createdAt: typeof rec.createdAt === 'string' ? rec.createdAt : new Date().toISOString(),
+              });
+            }
+          }
+        }
       }
     } catch {
       // Fall back cleanly to initial seed data if persistence file is corrupted
@@ -531,6 +547,8 @@ export class LiveChatterStore {
               mutedByUser: this.mutedByUser,
               authRecords: this.authRecords,
               questsByUser: this.questsByUser,
+              sessionsByUser: this.sessionsByUser,
+              sessionTokens: Array.from(this.tokens.values()),
             },
             null,
             2
@@ -547,13 +565,18 @@ export class LiveChatterStore {
     return crypto.scryptSync(password, salt, 64).toString('hex');
   }
 
+  private hashSessionToken(rawToken: string): string {
+    return crypto.createHash('sha256').update(rawToken).digest('hex');
+  }
+
   public issueSession(userId: string, device = 'Web Browser'): { token: string; user: User } {
     const user = this.users[userId];
     if (!user) throw new Error('User not found');
     const token = crypto.randomBytes(32).toString('hex');
+    const tokenHash = this.hashSessionToken(token);
     const sessionId = `sess-${crypto.randomBytes(6).toString('hex')}`;
-    this.tokens.set(token, {
-      token,
+    this.tokens.set(tokenHash, {
+      token: tokenHash,
       userId,
       sessionId,
       createdAt: new Date().toISOString(),
@@ -569,14 +592,28 @@ export class LiveChatterStore {
         current: true,
       },
       ...list.filter((s) => s.id !== sessionId).map((s) => ({ ...s, current: false })),
-    ].slice(0, 6);
+    ].slice(0, 12);
     this.sessionsByUser[userId] = nextList;
+    this.scheduleSave();
     return { token, user };
   }
 
   public verifyToken(token: string | undefined): SessionTokenRecord | null {
     if (!token) return null;
-    return this.tokens.get(token) || null;
+    const tokenHash = this.hashSessionToken(token);
+    const rec = this.tokens.get(tokenHash);
+    if (!rec || !this.users[rec.userId]) return null;
+    return rec;
+  }
+
+  public revokeToken(token: string | undefined) {
+    if (!token) return;
+    const tokenHash = this.hashSessionToken(token);
+    const rec = this.tokens.get(tokenHash);
+    if (!rec) return;
+    this.tokens.delete(tokenHash);
+    this.sessionsByUser[rec.userId] = (this.sessionsByUser[rec.userId] || []).filter((s) => s.id !== rec.sessionId);
+    this.scheduleSave();
   }
 
   public revokeSession(userId: string, sessionId: string) {
@@ -586,6 +623,7 @@ export class LiveChatterStore {
       }
     }
     this.sessionsByUser[userId] = (this.sessionsByUser[userId] || []).filter((s) => s.id !== sessionId);
+    this.scheduleSave();
   }
 
   public registerUser(input: {

@@ -9,6 +9,7 @@ import { CaptchaService } from './server/captcha.ts';
 
 const PORT = 3000;
 const app = express();
+app.set('trust proxy', 1);
 const store = new LiveChatterStore();
 const captcha = new CaptchaService();
 
@@ -123,8 +124,9 @@ function renderOAuthPopupHtml(
     <button type="button" onclick="window.close()" style="width:100%;padding:12px 16px;border:none;border-radius:10px;background:#2563eb;color:#ffffff;font-size:14px;font-weight:600;cursor:pointer;">
       Close Tab &amp; Return to LiveChatter
     </button>
+    ${isError ? '' : '<a href="livechatter://oauth-complete" style="display:block;width:100%;box-sizing:border-box;margin-top:10px;padding:11px 16px;border-radius:10px;background:#262b38;color:#e2e8f0;font-size:13px;font-weight:600;text-decoration:none;">Open LiveChatter Mobile App</a>'}
     <p id="fallback-note" style="font-size:12px;color:#94a3b8;margin:12px 0 0;line-height:1.4;">
-      If this tab does not close automatically, switch back to your AI Studio / LiveChatter tab.
+      If this tab does not close automatically, switch back to your AI Studio or LiveChatter app.
     </p>
   </div>
   <script>
@@ -145,6 +147,67 @@ function renderOAuthPopupHtml(
 interface AuthedRequest extends express.Request {
   userId?: string;
   sessionId?: string;
+  sessionToken?: string;
+}
+
+const SESSION_COOKIE_NAME = 'lc_session';
+// 10 years in seconds so users remain signed in indefinitely until they explicitly sign out
+const SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 365 * 10;
+
+function parseCookies(cookieHeader: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!cookieHeader) return out;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx <= 0) continue;
+    const key = part.slice(0, idx).trim();
+    const val = part.slice(idx + 1).trim();
+    if (key) {
+      try {
+        out[key] = decodeURIComponent(val);
+      } catch {
+        out[key] = val;
+      }
+    }
+  }
+  return out;
+}
+
+function isSecureRequest(req: express.Request): boolean {
+  const xfProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').toLowerCase();
+  return req.secure || xfProto === 'https' || host.endsWith('.run.app');
+}
+
+function setSessionCookie(req: express.Request, res: express.Response, token: string) {
+  const parts = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'Path=/',
+    `Max-Age=${SESSION_COOKIE_MAX_AGE}`,
+    'HttpOnly',
+  ];
+  if (isSecureRequest(req)) {
+    parts.push('SameSite=None', 'Secure', 'Partitioned');
+  } else {
+    parts.push('SameSite=Lax');
+  }
+  res.append('Set-Cookie', parts.join('; '));
+}
+
+function clearSessionCookie(req: express.Request, res: express.Response) {
+  const parts = [
+    `${SESSION_COOKIE_NAME}=`,
+    'Path=/',
+    'Max-Age=0',
+    'Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+    'HttpOnly',
+  ];
+  if (isSecureRequest(req)) {
+    parts.push('SameSite=None', 'Secure', 'Partitioned');
+  } else {
+    parts.push('SameSite=Lax');
+  }
+  res.append('Set-Cookie', parts.join('; '));
 }
 
 function getBearerToken(req: express.Request): string | undefined {
@@ -153,15 +216,51 @@ function getBearerToken(req: express.Request): string | undefined {
   return header.slice(7).trim();
 }
 
+function getSessionCookieToken(req: express.Request): string | undefined {
+  const cookies = parseCookies(req.headers.cookie);
+  const raw = cookies[SESSION_COOKIE_NAME];
+  return raw && raw.length >= 16 ? raw : undefined;
+}
+
+function isOriginMatchingHost(origin: string | undefined, req: http.IncomingMessage): boolean {
+  if (!origin) return false;
+  try {
+    const parsedOrigin = new URL(origin);
+    const expectedHost = String(req.headers['x-forwarded-host'] || req.headers.host || '')
+      .split(',')[0]
+      .trim()
+      .toLowerCase();
+    return Boolean(expectedHost) && parsedOrigin.host.toLowerCase() === expectedHost;
+  } catch {
+    return false;
+  }
+}
+
+function isCsrfProtectedRequest(req: express.Request): boolean {
+  const xrw = String(req.headers['x-requested-with'] || '').trim();
+  if (xrw === 'LiveChatter' || xrw === 'XMLHttpRequest') return true;
+  return isOriginMatchingHost(req.headers.origin, req);
+}
+
 function requireAuth(req: AuthedRequest, res: express.Response, next: express.NextFunction) {
-  const token = getBearerToken(req);
+  const bearer = getBearerToken(req);
+  const cookieToken = !bearer ? getSessionCookieToken(req) : undefined;
+  const token = bearer || cookieToken;
   const session = store.verifyToken(token);
   if (!session) {
     res.status(401).json({ error: 'Authentication required' });
     return;
   }
+  // Enforce CSRF check whenever a mutating route authenticates via HttpOnly cookie
+  if (!bearer && cookieToken && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method.toUpperCase())) {
+    if (!isCsrfProtectedRequest(req)) {
+      res.status(403).json({ error: 'Cross-site request blocked' });
+      return;
+    }
+  }
   req.userId = session.userId;
   req.sessionId = session.sessionId;
+  req.sessionToken = token;
   next();
 }
 
@@ -493,6 +592,7 @@ app.post('/api/auth/oauth/complete', (req, res) => {
       const kernel = store.getServer('srv-kernel');
       if (kernel) broadcast({ type: 'server:updated', payload: { server: kernel } });
     }
+    setSessionCookie(req, res, token);
     res.json({ token, user, isNewUser, snapshot: store.getSnapshot(user.id) });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to complete sign-in.' });
@@ -524,6 +624,7 @@ app.post('/api/auth/provider-auth', (req, res) => {
       const kernel = store.getServer('srv-kernel');
       if (kernel) broadcast({ type: 'server:updated', payload: { server: kernel } });
     }
+    setSessionCookie(req, res, token);
     res.json({ token, user, isNewUser, snapshot: store.getSnapshot(user.id) });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Sign-in failed.' });
@@ -548,6 +649,7 @@ app.post('/api/auth/register', (req, res) => {
     broadcast({ type: 'user:updated', payload: { user } });
     const kernel = store.getServer('srv-kernel');
     if (kernel) broadcast({ type: 'server:updated', payload: { server: kernel } });
+    setSessionCookie(req, res, token);
     res.json({ token, user, snapshot: store.getSnapshot(user.id) });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Registration failed' });
@@ -563,15 +665,53 @@ app.post('/api/auth/login', (req, res) => {
     }
     captcha.verifyAndConsume(captchaId, captchaAnswer);
     const { token, user } = store.loginUser(identifier, password);
+    setSessionCookie(req, res, token);
     res.json({ token, user, snapshot: store.getSnapshot(user.id) });
   } catch (err) {
     res.status(401).json({ error: err instanceof Error ? err.message : 'Login failed' });
   }
 });
 
+// Restore persistent session on app reload / mobile APK reopen until the user explicitly signs out
+app.get('/api/auth/session', (req, res) => {
+  const token = getBearerToken(req) || getSessionCookieToken(req);
+  const session = store.verifyToken(token);
+  if (!session || !token) {
+    res.json({ authenticated: false });
+    return;
+  }
+  const snapshot = store.getSnapshot(session.userId);
+  const user = snapshot.users[session.userId];
+  if (!user) {
+    clearSessionCookie(req, res);
+    res.json({ authenticated: false });
+    return;
+  }
+  setSessionCookie(req, res, token);
+  res.json({ authenticated: true, token, user, snapshot });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  const bearer = getBearerToken(req);
+  const cookieToken = getSessionCookieToken(req);
+  if (!bearer && cookieToken && !isCsrfProtectedRequest(req)) {
+    res.status(403).json({ error: 'Cross-site request blocked' });
+    return;
+  }
+  if (bearer) store.revokeToken(bearer);
+  if (cookieToken) store.revokeToken(cookieToken);
+  clearSessionCookie(req, res);
+  res.json({ ok: true });
+});
+
 app.post('/api/auth/revoke-session', requireAuth, (req: AuthedRequest, res) => {
   const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : '';
-  if (sessionId) store.revokeSession(req.userId!, sessionId);
+  if (sessionId) {
+    store.revokeSession(req.userId!, sessionId);
+    if (sessionId === req.sessionId) {
+      clearSessionCookie(req, res);
+    }
+  }
   res.json({ snapshot: store.getSnapshot(req.userId!) });
 });
 
@@ -1153,9 +1293,19 @@ async function start() {
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, req) => {
     const client: SocketClient = { ws, userId: null };
     clients.add(client);
+
+    // Auto-authenticate WebSocket from persistent HttpOnly session cookie when origin matches
+    const originHeader = req.headers.origin;
+    if (!originHeader || isOriginMatchingHost(originHeader, req)) {
+      const cookies = parseCookies(req.headers.cookie);
+      const cookieSess = store.verifyToken(cookies[SESSION_COOKIE_NAME]);
+      if (cookieSess) {
+        client.userId = cookieSess.userId;
+      }
+    }
 
     ws.on('message', (raw) => {
       try {

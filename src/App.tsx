@@ -33,6 +33,7 @@ import {
 
 export default function App() {
   const [state, setState] = useState<AppStateSnapshot | null>(null);
+  const [checkingSession, setCheckingSession] = useState(true);
   const [pendingUrlInvite, setPendingUrlInvite] = useState<string | null>(() => {
     const params = new URLSearchParams(window.location.search);
     const code = params.get('invite');
@@ -337,13 +338,44 @@ export default function App() {
     [handleWsEvent, pendingUrlInvite]
   );
 
-  const handleSignOut = useCallback(() => {
+  const handleSignOut = useCallback(async () => {
+    await api.logout().catch(() => {});
     socketRef.current?.disconnect();
     socketRef.current = null;
     setAuthToken(null);
     setUserSettingsOpen(false);
     setState(null);
   }, []);
+
+  const didRestoreSessionRef = useRef(false);
+
+  // Automatically restore persistent session once on app load until user explicitly signs out
+  useEffect(() => {
+    if (didRestoreSessionRef.current) return;
+    didRestoreSessionRef.current = true;
+    let active = true;
+    api
+      .restoreSession()
+      .then((res) => {
+        if (!active) return;
+        if (res.authenticated) {
+          handleAuthenticated({
+            token: res.token,
+            user: res.user,
+            snapshot: res.snapshot,
+          });
+        }
+      })
+      .catch(() => {
+        // Stay on sign-in gate if session cannot be restored
+      })
+      .finally(() => {
+        if (active) setCheckingSession(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [handleAuthenticated]);
 
   // Expire stale typing indicators
   useEffect(() => {
@@ -430,6 +462,19 @@ export default function App() {
       prev ? { ...prev, unreadChannelIds: prev.unreadChannelIds.filter((id) => id !== channelId) } : prev
     );
   };
+
+  if (checkingSession) {
+    return (
+      <div className="min-h-screen w-full bg-[#171A21] text-slate-200 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <div className="h-9 w-9 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center">
+            <div className="h-4 w-4 rounded-full border-2 border-blue-400 border-t-transparent animate-spin" />
+          </div>
+          <p className="text-xs font-medium text-slate-400">Restoring your LiveChatter session…</p>
+        </div>
+      </div>
+    );
+  }
 
   // Mandatory Google Sign-In + Final-Step CAPTCHA Gate
   if (!state || !currentUser) {
@@ -1403,7 +1448,16 @@ export default function App() {
             );
           }}
           onRevokeSession={async (sessionId) => {
+            const isCurrent = state.sessions.some((s) => s.id === sessionId && s.current);
             const { snapshot } = await api.revokeSession(sessionId);
+            if (isCurrent) {
+              socketRef.current?.disconnect();
+              socketRef.current = null;
+              setAuthToken(null);
+              setUserSettingsOpen(false);
+              setState(null);
+              return;
+            }
             setState(snapshot);
             showToast('Remote session signed out.');
           }}
